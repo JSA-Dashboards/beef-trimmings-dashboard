@@ -5,8 +5,18 @@ import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from datetime import datetime, timedelta
+from pathlib import Path
 import time
 import os
+import sys
+
+# Streamlit puts the MAIN script's directory on sys.path, never the page's,
+# so this folder is never added automatically -- without the insert the
+# trimmings_qc import below dies with ModuleNotFoundError under the portal
+# shell. It works standalone, which is how it would reach production unseen.
+sys.path.insert(0, str(Path(__file__).parent))
+
+import trimmings_qc as qc
 
 # ── JPSI Brand ───────────────────────────────────────────────────────────────
 JPSI_DARK = "#32373c"
@@ -16,7 +26,8 @@ BORDER    = "#e2e5e9"
 POS       = "#1a7f37"
 NEG       = "#c62828"
 
-US_COLOR  = JPSI_BLUE      # US Fresh 90s (domestic)
+US_COLOR  = JPSI_BLUE      # US Fresh 90s (domestic, daily print)
+US_WK_COLOR = "#0b4f7a"    # US Fresh 90s (domestic, weekly average)
 SA_COLOR  = "#e8833a"      # South America Frozen 90s (import)
 ANZ_COLOR = "#5aa469"      # Australia/NZ Frozen 90s (import)
 
@@ -28,6 +39,15 @@ JSA_LOGO = "https://www.jpsi.com/wp-content/themes/gate39media/img/logo-full.png
 LMR_BASE      = "https://mpr.datamart.ams.usda.gov/services/v1.1/reports"
 XB401_ID      = 2451
 US_ITEM       = "Chemical Lean, Fresh 90%"
+
+# Weekly companion to LM_XB401: National/Regional Weekly Boneless Processing
+# Beef and Beef Trimmings (LM_XB460) -- same item, same source, but averaged
+# over the whole week's trade instead of one session's. The daily line is a
+# weighted average of whatever happened to trade that afternoon, so a single
+# off-market cluster can drag it a long way with nothing in the file looking
+# wrong; see trimmings_qc.py for the day that cost an afternoon. The weekly
+# line is the steadier read, drawn over the daily one on the price chart.
+XB460_ID      = 2462
 
 # South America / Australia-NZ Frozen 90s proxy: USDA AMS MARS, Import Beef
 # Trade (NW_LS421), commodity "Cow Meat (90%)" broken out by country of origin.
@@ -54,6 +74,12 @@ ORIGIN_ANZ    = "Australia &/ New Zealand"
 # stays small/fast (a few MB).
 US_FULL_HISTORY_REPORTS = 6000
 IMPORT_HISTORY_START    = "01/01/2019"
+# LM_XB460 reaches back to 2003-01-03 -- 1,236 weekly reports as of Sep 2026,
+# so 1300 covers the archive with headroom. Fetched through the section path
+# (/<id>/National) rather than allSections=true: the weekly file also carries
+# Central, East Coast and West Coast, and dropping those three returns the
+# same National rows in ~19MB/8s instead of ~73MB/25s.
+US_WEEKLY_HISTORY_REPORTS = 1300
 
 WATERMARK_OPACITY = 0.10
 
@@ -118,6 +144,15 @@ st.markdown(f"""
   .tile-delta-neu {{ color:{MUTED}; font-size:0.8rem; font-weight:600; margin-top:4px; }}
 
   .note {{ color:{MUTED}; font-size:0.72rem; line-height:1.5; }}
+
+  .caution {{
+    background:#fff8e6; border:1px solid #f0d488; border-left:4px solid #d99e0b;
+    border-radius:8px; padding:12px 14px; margin:0 0 14px;
+    color:{JPSI_DARK}; font-size:0.79rem; line-height:1.55;
+  }}
+  .caution b {{ color:#8a6100; }}
+  .caution ul {{ margin:8px 0 0 18px; padding:0; }}
+  .caution li {{ margin:3px 0; }}
   hr {{ border-color:{BORDER}; }}
 
   .stButton > button {{
@@ -153,25 +188,11 @@ def fmt(v):
     return f"${v:.2f}" if v is not None else "—"
 
 
-def changes(df: pd.DataFrame, date_col: str, val_col: str, deltas):
-    """Return current value + a value change for each timedelta in `deltas`,
-    walking back to the most recent prior observation at or before that offset."""
-    valid = df[df[val_col].notna()]
-    if valid.empty:
-        return (None,) + (None,) * len(deltas)
-    cur  = valid.iloc[-1]
-    cval = cur[val_col]
-    cdt  = cur[date_col]
-
-    def prior(delta):
-        sub = valid[valid[date_col] <= cdt - delta]
-        return sub.iloc[-1][val_col] if not sub.empty else None
-
-    out = [cval]
-    for d in deltas:
-        p = prior(d)
-        out.append(cval - p if p is not None else None)
-    return tuple(out)
+# changes() and the PREV sentinel live in trimmings_qc so they can be tested --
+# app.py renders on import, so nothing defined in here can be reached from a
+# test. The offset-vs-previous-observation bug this fixes is documented there.
+changes = qc.changes
+PREV    = qc.PREV
 
 
 # ── Data Fetching ────────────────────────────────────────────────────────────
@@ -206,23 +227,77 @@ def fetch_us_fresh90() -> pd.DataFrame:
         df = df[df["item_norm"] == US_ITEM].copy()
         df["report_date"] = pd.to_datetime(df["report_date"], errors="coerce")
         df["avg_price"]   = pd.to_numeric(df["price_range_avg"], errors="coerce")
+        df["low_price"]   = pd.to_numeric(df["price_range_low"], errors="coerce")
+        df["high_price"]  = pd.to_numeric(df["price_range_high"], errors="coerce")
         df["trades"]      = pd.to_numeric(df["number_trades"], errors="coerce")
-        df.loc[df["avg_price"] <= 0, "avg_price"] = None
+        # total_pounds arrives thousands-separated ("444,658"); to_numeric on
+        # its own coerces that straight to NaN.
+        df["pounds"]      = pd.to_numeric(
+            df["total_pounds"].astype(str).str.replace(",", "", regex=False), errors="coerce")
+        # AMS writes 0.00 for "nothing traded", which is not a price of zero.
+        for _c in ("avg_price", "low_price", "high_price"):
+            df.loc[df[_c] <= 0, _c] = None
         df = df.dropna(subset=["report_date"]).sort_values("report_date")
-        frames[name.lower()] = df[["report_date", "avg_price", "trades"]].reset_index(drop=True)
+        frames[name.lower()] = df[["report_date", "avg_price", "low_price", "high_price",
+                                   "trades", "pounds"]].reset_index(drop=True)
 
-    national = frames.get("national", pd.DataFrame(columns=["report_date", "avg_price", "trades"]))
-    central  = frames.get("central",  pd.DataFrame(columns=["report_date", "avg_price", "trades"]))
+    _cols = ["report_date", "avg_price", "low_price", "high_price", "trades", "pounds"]
+    national = frames.get("national", pd.DataFrame(columns=_cols))
+    central  = frames.get("central",  pd.DataFrame(columns=_cols))
 
-    out = national.rename(columns={"avg_price": "national", "trades": "national_trades"})
+    out = national.rename(columns={
+        "avg_price": "national", "low_price": "national_low",
+        "high_price": "national_high", "trades": "national_trades",
+        "pounds": "national_pounds",
+    })
     if not central.empty:
         out = out.merge(
-            central.rename(columns={"avg_price": "central", "trades": "central_trades"}),
+            central[["report_date", "avg_price", "trades"]].rename(
+                columns={"avg_price": "central", "trades": "central_trades"}),
             on="report_date", how="outer",
         )
     else:
         out["central"], out["central_trades"] = None, None
     return out.sort_values("report_date").reset_index(drop=True)
+
+
+@st.cache_data(ttl=21600, persist="disk", show_spinner=False)
+def fetch_us_weekly90() -> pd.DataFrame:
+    """Full-history weekly US Chemical Lean, Fresh 90% national average (LM_XB460).
+
+    Same item and same source as the daily line, averaged across the week's
+    entire trade. Where one session's average can be captured by a single
+    cluster, the weekly runs over several times the poundage -- it is the
+    number to reach for when a day looks wrong.
+    """
+    url  = f"{LMR_BASE}/{XB460_ID}/National"
+    sess = _session()
+    resp = sess.get(url, params={"lastReports": US_WEEKLY_HISTORY_REPORTS}, timeout=180)
+    resp.raise_for_status()
+    payload = resp.json()
+
+    # The section path returns ONE object with a flat `results` list, not the
+    # list-of-sections that allSections=true returns. Indexing it like the
+    # latter yields an empty frame and a silently blank line on the chart.
+    rows = payload.get("results", []) if isinstance(payload, dict) else []
+    cols = ["report_date", "weekly", "weekly_trades", "weekly_pounds"]
+    if not rows:
+        return pd.DataFrame(columns=cols)
+
+    df = pd.DataFrame(rows)
+    df["item_norm"] = df["item_desc"].str.replace(r"\s+", " ", regex=True).str.strip()
+    df = df[df["item_norm"] == US_ITEM].copy()
+    if df.empty:
+        return pd.DataFrame(columns=cols)
+
+    df["report_date"]   = pd.to_datetime(df["report_date"], errors="coerce")
+    df["weekly"]        = pd.to_numeric(df["price_range_avg"], errors="coerce")
+    df["weekly_trades"] = pd.to_numeric(df["number_trades"], errors="coerce")
+    df["weekly_pounds"] = pd.to_numeric(
+        df["total_pounds"].astype(str).str.replace(",", "", regex=False), errors="coerce")
+    df.loc[df["weekly"] <= 0, "weekly"] = None
+    df = df.dropna(subset=["report_date"]).sort_values("report_date")
+    return df[cols].reset_index(drop=True)
 
 
 @st.cache_data(ttl=21600, persist="disk", show_spinner=False)
@@ -299,6 +374,10 @@ with st.sidebar:
         '<b>US Fresh 90s</b> — USDA AMS LMR, National/Regional Daily Boneless '
         'Processing Beef/Beef Trimmings PM (<b>LM_XB401</b>), Chemical Lean Fresh 90% national line. '
         'Published ~2:30pm CT most business days; volume is not guaranteed daily.<br><br>'
+        '<b>US Fresh 90s, weekly average</b> — same item from the weekly companion report, '
+        'National/Regional Weekly Boneless Processing Beef and Beef Trimmings (<b>LM_XB460</b>), '
+        'averaged over the week\'s entire trade. Drawn over the daily line, and the level to trust '
+        'when one session prints far away from it.<br><br>'
         '<b>South America &amp; Australia/NZ Frozen 90s</b> — USDA AMS MARS, '
         'Import Beef Trade (<b>NW_LS421</b>), &quot;Cow Meat (90%)&quot; line by country of origin — '
         'the accepted proxy for import Frozen 90s. Published weekly, Fridays. Values average across '
@@ -318,6 +397,15 @@ with st.spinner("Loading full USDA beef trimmings history (US pull can take ~60-
     except Exception as e:
         load_ok, err_msg = False, str(e)
         us_hist, imp_hist = pd.DataFrame(), pd.DataFrame()
+
+    # The weekly line is context, not the product. If LM_XB460 is down the page
+    # still has to render the daily number it has always rendered, so this gets
+    # its own handler instead of joining the hard-stop path above.
+    try:
+        us_weekly = fetch_us_weekly90()
+    except Exception:
+        us_weekly = pd.DataFrame(
+            columns=["report_date", "weekly", "weekly_trades", "weekly_pounds"])
 
 
 # ── Header ───────────────────────────────────────────────────────────────────
@@ -350,15 +438,33 @@ if us_hist.empty and imp_hist.empty:
 
 # ── Compute Changes ──────────────────────────────────────────────────────────
 
-DAY, WEEK, MONTH, YEAR = timedelta(days=2), timedelta(days=8), timedelta(days=30), timedelta(days=365)
+# Day and week tiles compare against the PREVIOUS OBSERVATION, not a date
+# offset: the daily series prints on consecutive sessions and the weekly ones
+# are spaced exactly 7 days, so a 2-day / 8-day lookback steps over the very
+# period it names. Month and year stay real offsets -- there the elapsed time
+# is what the label means. trimmings_qc records the numbers this got wrong.
+MONTH, YEAR = timedelta(days=30), timedelta(days=365)
 
-us_cur, us_d1, us_d30, us_d365 = changes(us_hist, "report_date", "national", [DAY, MONTH, YEAR])
+us_cur, us_d1, us_d30, us_d365 = changes(us_hist, "report_date", "national", [PREV, MONTH, YEAR])
+
+# Weekly LM_XB460 level, plus a verdict on the latest daily print. USDA's
+# published daily number stays the headline and is never adjusted here -- the
+# verdict only decides whether to SAY that a session is not a clean read of the
+# market. Thresholds and the measured basis for them live in trimmings_qc.py.
+wk_cur, wk_w1 = changes(us_weekly, "report_date", "weekly", [PREV])
+
+_us_priced = us_hist.dropna(subset=["national"]) if not us_hist.empty else us_hist
+us_latest  = _us_priced.iloc[-1] if not _us_priced.empty else None
+assessment = qc.assess_print(
+    us_latest["national"], us_latest["central"],
+    us_latest["national_low"], us_latest["national_high"],
+) if us_latest is not None else None
 
 sa_df  = pivot_origin(imp_hist, "South America")
 anz_df = pivot_origin(imp_hist, "Australia/NZ")
 
-sa_cur,  sa_w1,  sa_m1,  sa_y1  = changes(sa_df,  "report_date", "avg_price", [WEEK, MONTH, YEAR])
-anz_cur, anz_w1, anz_m1, anz_y1 = changes(anz_df, "report_date", "avg_price", [WEEK, MONTH, YEAR])
+sa_cur,  sa_w1,  sa_m1,  sa_y1  = changes(sa_df,  "report_date", "avg_price", [PREV, MONTH, YEAR])
+anz_cur, anz_w1, anz_m1, anz_y1 = changes(anz_df, "report_date", "avg_price", [PREV, MONTH, YEAR])
 
 spread_us_sa  = (us_cur - sa_cur)  if (us_cur is not None and sa_cur  is not None) else None
 spread_us_anz = (us_cur - anz_cur) if (us_cur is not None and anz_cur is not None) else None
@@ -382,15 +488,44 @@ with c2:
 # ── Tiles — US Fresh 90s ─────────────────────────────────────────────────────
 
 st.markdown('<div class="sec-header">US Fresh 90s — Chemical Lean, National ($/cwt)</div>', unsafe_allow_html=True)
-cols = st.columns(4)
+
+if assessment is not None and assessment.flagged:
+    _bullets = "".join(f"<li>{_reason}</li>" for _reason in assessment.reasons)
+    _ref = ""
+    if wk_cur is not None:
+        _ref = (f"The LM_XB460 weekly average over the same week is "
+                f"<b>${wk_cur:,.2f}</b>. ")
+    st.markdown(
+        '<div class="caution">'
+        '<b>⚠ This session’s national print is not a clean read of the market.</b> '
+        'The tiles below still show exactly what USDA published — nothing here is adjusted.'
+        f'<ul>{_bullets}</ul>'
+        f'<div style="margin-top:8px;">{_ref}The weekly line on the price chart is '
+        'the steadier level.</div>'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+cols = st.columns(5)
 with cols[0]:
-    st.markdown(tile("Current", fmt(us_cur), cls="tile-us"), unsafe_allow_html=True)
+    st.markdown(tile("Current (daily)", fmt(us_cur), cls="tile-us"), unsafe_allow_html=True)
 with cols[1]:
     st.markdown(tile("Day change", fmt(us_d1), delta_html(us_d1), "tile-us"), unsafe_allow_html=True)
 with cols[2]:
-    st.markdown(tile("Month change", fmt(us_d30), delta_html(us_d30), "tile-us"), unsafe_allow_html=True)
+    st.markdown(tile("Weekly avg", fmt(wk_cur), delta_html(wk_w1), "tile-us"), unsafe_allow_html=True)
 with cols[3]:
+    st.markdown(tile("Month change", fmt(us_d30), delta_html(us_d30), "tile-us"), unsafe_allow_html=True)
+with cols[4]:
     st.markdown(tile("Year change", fmt(us_d365), delta_html(us_d365), "tile-us"), unsafe_allow_html=True)
+st.markdown(
+    '<div class="note" style="margin-top:6px;">'
+    '<b>Current (daily)</b> and <b>Day change</b> are the LM_XB401 national weighted average for '
+    'the latest session, exactly as USDA publishes it. <b>Weekly avg</b> is LM_XB460 over that '
+    'week’s entire trade, shown with its week-over-week change. One session can be carried by a '
+    'single off-market cluster; when the two disagree sharply, the weekly is the more reliable '
+    'level.</div>',
+    unsafe_allow_html=True,
+)
 
 # ── Tiles — South America Frozen 90s ─────────────────────────────────────────
 
@@ -448,11 +583,23 @@ fig = go.Figure()
 
 us_plot = us_hist.dropna(subset=["national"])
 if not us_plot.empty:
+    # Thinner than the weekly it sits under: the daily is the published number,
+    # but it is also the noisier one, and on a lopsided session it is the line
+    # that misleads.
     fig.add_trace(go.Scatter(
         x=us_plot["report_date"], y=us_plot["national"],
         name="US Fresh 90s (daily)", mode="lines",
-        line=dict(color=US_COLOR, width=2), connectgaps=True,
+        line=dict(color=US_COLOR, width=1.4), connectgaps=True,
         hovertemplate="<b>US Fresh 90s</b>: $%{y:.2f}<extra></extra>",
+    ))
+
+wk_plot = us_weekly.dropna(subset=["weekly"]) if not us_weekly.empty else us_weekly
+if not wk_plot.empty:
+    fig.add_trace(go.Scatter(
+        x=wk_plot["report_date"], y=wk_plot["weekly"],
+        name="US Fresh 90s (weekly avg)", mode="lines",
+        line=dict(color=US_WK_COLOR, width=2.4), connectgaps=True,
+        hovertemplate="<b>US Fresh 90s, weekly avg</b>: $%{y:.2f}<extra></extra>",
     ))
 
 if not sa_df.empty:
@@ -572,16 +719,43 @@ with st.expander("📋  US Fresh 90s — data table"):
     disp = us_hist.copy()
     disp["report_date"] = disp["report_date"].dt.strftime("%Y-%m-%d")
     disp = disp.rename(columns={
-        "report_date": "Date", "national": "National ($/cwt)", "national_trades": "National trades",
+        "report_date": "Date", "national": "National ($/cwt)",
+        "national_low": "National low", "national_high": "National high",
+        "national_trades": "National trades", "national_pounds": "National lb",
         "central": "Central ($/cwt)", "central_trades": "Central trades",
     }).sort_values("Date", ascending=False).reset_index(drop=True)
     st.dataframe(
         disp.style.format({
             "National ($/cwt)": "${:.2f}", "Central ($/cwt)": "${:.2f}",
+            "National low": "${:.2f}", "National high": "${:.2f}",
+            "National lb": "{:,.0f}",
             "National trades": "{:.0f}", "Central trades": "{:.0f}",
         }, na_rep="—"),
         width="stretch", height=320,
     )
+    st.markdown(
+        '<div class="note">Low and high are the day’s national price range. A range far wider '
+        'than usual, or a national average well away from the Central line, means the average is '
+        'blending trades that are not really the same market.</div>',
+        unsafe_allow_html=True,
+    )
+
+with st.expander("📋  US Fresh 90s — weekly average (LM_XB460)"):
+    if us_weekly.empty:
+        st.info("Weekly LM_XB460 data is unavailable.")
+    else:
+        wdisp = us_weekly.copy()
+        wdisp["report_date"] = wdisp["report_date"].dt.strftime("%Y-%m-%d")
+        wdisp = wdisp.rename(columns={
+            "report_date": "Week ending", "weekly": "National avg ($/cwt)",
+            "weekly_trades": "Trades", "weekly_pounds": "Pounds",
+        }).sort_values("Week ending", ascending=False).reset_index(drop=True)
+        st.dataframe(
+            wdisp.style.format({
+                "National avg ($/cwt)": "${:.2f}", "Trades": "{:.0f}", "Pounds": "{:,.0f}",
+            }, na_rep="—"),
+            width="stretch", height=320,
+        )
 
 with st.expander("📋  Import Cow Meat (90%) — weekly data table"):
     disp = imp_hist.copy()
