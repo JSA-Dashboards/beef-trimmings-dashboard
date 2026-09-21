@@ -99,6 +99,14 @@ st.markdown(f"""
     font-family: 'Source Sans Pro', system-ui, -apple-system, sans-serif !important;
   }}
 
+  /* The font rule above ends in `span, div` with !important, which also
+     captures Streamlit's Material icon spans -- the expander chevron then
+     renders its ligature NAME ("keyboard_arrow_down") as literal text on top
+     of the label. Hand those spans their icon font back. */
+  [data-testid="stIconMaterial"], span[class*="material-symbols"] {{
+    font-family: 'Material Symbols Rounded' !important;
+  }}
+
   header[data-testid="stHeader"] {{ display:none !important; }}
   #MainMenu, footer {{ visibility:hidden !important; }}
   .stDeployButton {{ display:none; }}
@@ -145,14 +153,26 @@ st.markdown(f"""
 
   .note {{ color:{MUTED}; font-size:0.72rem; line-height:1.5; }}
 
-  .caution {{
-    background:#fff8e6; border:1px solid #f0d488; border-left:4px solid #d99e0b;
-    border-radius:8px; padding:12px 14px; margin:0 0 14px;
-    color:{JPSI_DARK}; font-size:0.79rem; line-height:1.55;
+  .ctx-flag {{
+    border-left:3px solid #d99e0b; background:#fffdf7;
+    padding:7px 12px; margin:0 0 12px; border-radius:0 6px 6px 0;
+    color:{JPSI_DARK}; font-size:0.75rem; line-height:1.5;
   }}
-  .caution b {{ color:#8a6100; }}
-  .caution ul {{ margin:8px 0 0 18px; padding:0; }}
-  .caution li {{ margin:3px 0; }}
+  .ctx-flag-hint {{ color:{MUTED}; }}
+
+  .ctx {{ width:100%; border-collapse:collapse; font-size:0.78rem; }}
+  .ctx th {{
+    text-align:right; color:{MUTED}; font-weight:700; font-size:0.64rem;
+    text-transform:uppercase; letter-spacing:0.07em; padding:6px 10px;
+    border-bottom:1px solid {BORDER}; white-space:nowrap;
+  }}
+  .ctx th:first-child, .ctx td:first-child {{ text-align:left; }}
+  .ctx td {{
+    text-align:right; padding:8px 10px; color:{JPSI_DARK};
+    border-bottom:1px solid #f2f4f6; white-space:nowrap;
+  }}
+  .ctx td:first-child {{ font-weight:600; }}
+  .ctx tr.derived td {{ color:{MUTED}; font-style:italic; }}
   hr {{ border-color:{BORDER}; }}
 
   .stButton > button {{
@@ -186,6 +206,26 @@ def tile(label, value, delta="", cls=""):
 
 def fmt(v):
     return f"${v:.2f}" if v is not None else "—"
+
+
+def _num(v, spec):
+    """Format a possibly-missing number. None/NaN/junk all render as a dash."""
+    try:
+        if v is None or pd.isna(v):
+            return "—"
+        return spec.format(v)
+    except (TypeError, ValueError):
+        return "—"
+
+
+def ctx_row(label, trades, pounds, low, high, avg, cls=""):
+    """One region's line in the breakdown table."""
+    rng = "—"
+    if _num(low, "{}") != "—" and _num(high, "{}") != "—":
+        rng = "${:,.2f}–${:,.2f}".format(low, high)
+    return ('<tr class="{}"><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>'
+            .format(cls, label, _num(trades, "{:,.0f}"), _num(pounds, "{:,.0f}"),
+                    rng, _num(avg, "${:,.2f}")))
 
 
 # changes() and the PREV sentinel live in trimmings_qc so they can be tested --
@@ -251,13 +291,21 @@ def fetch_us_fresh90() -> pd.DataFrame:
         "pounds": "national_pounds",
     })
     if not central.empty:
+        # Central's range and weight matter as much as its average: they are what
+        # the "what's behind this print" breakdown divides to work out where the
+        # rest of the country traded.
         out = out.merge(
-            central[["report_date", "avg_price", "trades"]].rename(
-                columns={"avg_price": "central", "trades": "central_trades"}),
+            central.rename(columns={
+                "avg_price": "central", "low_price": "central_low",
+                "high_price": "central_high", "trades": "central_trades",
+                "pounds": "central_pounds",
+            }),
             on="report_date", how="outer",
         )
     else:
-        out["central"], out["central_trades"] = None, None
+        for _c in ("central", "central_low", "central_high",
+                   "central_trades", "central_pounds"):
+            out[_c] = None
     return out.sort_values("report_date").reset_index(drop=True)
 
 
@@ -489,20 +537,25 @@ with c2:
 
 st.markdown('<div class="sec-header">US Fresh 90s — Chemical Lean, National ($/cwt)</div>', unsafe_allow_html=True)
 
+# A thin rule, not a verdict. It reports what is unusual about the session and
+# stops there -- whether that makes the print a good read of the market is the
+# desk's call, not the page's. The breakdown below carries the detail.
 if assessment is not None and assessment.flagged:
-    _bullets = "".join(f"<li>{_reason}</li>" for _reason in assessment.reasons)
-    _ref = ""
+    _bits = []
+    if assessment.divergence is not None and abs(assessment.divergence) > qc.DIVERGENCE_LIMIT:
+        _bits.append("National <b>{}</b> vs Central <b>{}</b>".format(
+            _num(us_latest["national"], "${:,.2f}"),
+            _num(us_latest["central"], "${:,.2f}")))
+    if assessment.dispersion is not None and assessment.dispersion > qc.DISPERSION_LIMIT:
+        _bits.append("range {}–{} ({} wide, vs $68 widest since 2023)".format(
+            _num(us_latest["national_low"], "${:,.2f}"),
+            _num(us_latest["national_high"], "${:,.2f}"),
+            _num(assessment.dispersion, "${:,.0f}")))
     if wk_cur is not None:
-        _ref = (f"The LM_XB460 weekly average over the same week is "
-                f"<b>${wk_cur:,.2f}</b>. ")
+        _bits.append("week <b>{}</b>".format(_num(wk_cur, "${:,.2f}")))
     st.markdown(
-        '<div class="caution">'
-        '<b>⚠ This session’s national print is not a clean read of the market.</b> '
-        'The tiles below still show exactly what USDA published — nothing here is adjusted.'
-        f'<ul>{_bullets}</ul>'
-        f'<div style="margin-top:8px;">{_ref}The weekly line on the price chart is '
-        'the steadier level.</div>'
-        '</div>',
+        '<div class="ctx-flag">' + " &nbsp;·&nbsp; ".join(_bits)
+        + ' &nbsp;·&nbsp; <span class="ctx-flag-hint">breakdown below</span></div>',
         unsafe_allow_html=True,
     )
 
@@ -526,6 +579,49 @@ st.markdown(
     'level.</div>',
     unsafe_allow_html=True,
 )
+
+# Collapsed by default: the page reads exactly as it did before, and the drivers
+# are one click away for anyone asking why the number moved.
+with st.expander("What’s behind this print — trades, Central vs National, price range"):
+    if us_latest is None:
+        st.info("No priced session to break down.")
+    else:
+        _d = us_latest
+        _body = [
+            ctx_row("National (all states)", _d["national_trades"], _d["national_pounds"],
+                    _d["national_low"], _d["national_high"], _d["national"]),
+            ctx_row("Central", _d["central_trades"], _d["central_pounds"],
+                    _d["central_low"], _d["central_high"], _d["central"]),
+        ]
+        _rest = qc.implied_outside_central(
+            _d["national"], _d["national_pounds"], _d["central"], _d["central_pounds"])
+        if _rest is not None:
+            _rest_avg, _rest_lb = _rest
+            _rest_trades = None
+            if pd.notna(_d["national_trades"]) and pd.notna(_d["central_trades"]):
+                _rest_trades = _d["national_trades"] - _d["central_trades"]
+            _body.append(ctx_row("Outside Central", _rest_trades, _rest_lb,
+                                 None, None, _rest_avg, cls="derived"))
+        st.markdown(
+            '<div class="note" style="margin-bottom:8px;">Session of <b>{}</b>, '
+            'Chemical Lean Fresh 90% (LM_XB401).</div>'.format(
+                _d["report_date"].strftime("%b %d, %Y")),
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            '<table class="ctx"><thead><tr><th>Region</th><th>Trades</th><th>Pounds</th>'
+            '<th>Price range</th><th>Wtd avg</th></tr></thead><tbody>'
+            + "".join(_body) + '</tbody></table>',
+            unsafe_allow_html=True,
+        )
+        st.markdown(
+            '<div class="note" style="margin-top:10px;">National covers all states and '
+            '<i>includes</i> Central, so the last row is what is left once Central’s pounds '
+            'are backed out of the national weighted average — the East and West Coast trade '
+            'that USDA does not publish as its own line. Derived here, not reported, and '
+            'omitted when Central is unpriced or too little weight is left to divide by.</div>',
+            unsafe_allow_html=True,
+        )
 
 # ── Tiles — South America Frozen 90s ─────────────────────────────────────────
 

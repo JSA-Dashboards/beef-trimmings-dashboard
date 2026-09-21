@@ -111,6 +111,45 @@ def dispersion(low, high) -> Optional[float]:
     return hi - lo
 
 
+def _pounds(x) -> Optional[float]:
+    """Coerce a reported weight. AMS writes these thousands-separated."""
+    try:
+        v = float(str(x).replace(",", "").strip())
+    except (TypeError, ValueError, AttributeError):
+        return None
+    return v if v > 0 else None       # NaN fails this too, which is the point
+
+
+# A load is 40,000 lb and AMS reports to the pound, so a remainder smaller than
+# this is rounding noise in the published averages rather than a real trade.
+# Dividing by it would turn a fraction of a cent into a wild price.
+MIN_RESIDUAL_POUNDS = 1_000.0
+
+
+def implied_outside_central(national_avg, national_pounds,
+                            central_avg, central_pounds):
+    """Weighted average of the trade that happened OUTSIDE the Central states.
+
+    National covers all states and therefore INCLUDES Central, so the rest of
+    the country is what is left when Central's pounds are backed out of the
+    national weighted average. This is the number that EXPLAINS a National /
+    Central gap instead of merely reporting it: on 2026-09-18, National $345.42
+    against Central $436.15 implies ~$309.55 across ~319k lb everywhere else.
+    USDA does not publish that line; it is derived here and labelled as such.
+
+    Returns (avg, pounds), or None when either line is unpriced, a weight is
+    missing, or too little is left over to divide by safely.
+    """
+    n_avg, c_avg = _price(national_avg), _price(central_avg)
+    n_lb, c_lb = _pounds(national_pounds), _pounds(central_pounds)
+    if n_avg is None or c_avg is None or n_lb is None or c_lb is None:
+        return None
+    rest = n_lb - c_lb
+    if rest < MIN_RESIDUAL_POUNDS:
+        return None
+    return ((n_avg * n_lb - c_avg * c_lb) / rest, rest)
+
+
 def assess_print(national_avg, central_avg, low, high) -> Assessment:
     """Decide whether a day's national print should carry a caveat."""
     div = divergence(national_avg, central_avg)

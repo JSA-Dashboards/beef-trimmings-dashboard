@@ -31,11 +31,13 @@ else:  # pragma: no cover
 from trimmings_qc import (  # noqa: E402
     DISPERSION_LIMIT,
     DIVERGENCE_LIMIT,
+    MIN_RESIDUAL_POUNDS,
     PREV,
     assess_print,
     changes,
     dispersion,
     divergence,
+    implied_outside_central,
 )
 
 
@@ -187,6 +189,68 @@ def test_timedelta_still_means_elapsed_time():
     df = _frame(["2026-06-18", "2026-08-19", "2026-09-18"], [460.00, 450.00, 408.40])
     _, month = changes(df, "d", "v", [timedelta(days=30)])
     assert month == pytest.approx(408.40 - 450.00, abs=0.01)
+
+
+# ═══ 3. Where the rest of the country traded ═════════════════════════════════
+
+def test_backs_central_out_of_the_national_average():
+    """The 2026-09-18 session, from the LM_XB401 PDF.
+
+    National 15 trades / 444,658 lb @ $345.42, Central 3 / 125,996 @ $436.15.
+    What is left is ~319k lb at ~$309.55 -- the number that explains the gap.
+    """
+    avg, lb = implied_outside_central(345.42, 444658, 436.15, 125996)
+    assert lb == pytest.approx(318662)
+    assert avg == pytest.approx(309.55, abs=0.01)
+
+
+def test_ordinary_day_leaves_the_rest_near_the_national_average():
+    """2026-09-16: National $428.00, Central $427.80 -- no meaningful split."""
+    avg, _ = implied_outside_central(428.00, 878691, 427.80, 700000)
+    assert avg == pytest.approx(428.79, abs=0.5)
+
+
+def test_pounds_parse_thousands_separators():
+    """AMS writes weights as "444,658"; raw float() would raise on that."""
+    a = implied_outside_central(345.42, "444,658", 436.15, "125,996")
+    b = implied_outside_central(345.42, 444658, 436.15, 125996)
+    assert a[0] == pytest.approx(b[0])
+    assert a[1] == pytest.approx(b[1])
+
+
+@pytest.mark.parametrize("central_avg", [0, 0.0, "0.00", None, "", "NA"])
+def test_unpriced_central_yields_nothing(central_avg):
+    """Central is unpriced on 259 of 623 days -- there is nothing to back out."""
+    assert implied_outside_central(430.00, 444658, central_avg, 0) is None
+
+
+@pytest.mark.parametrize("bad", [None, "", "NA", 0, -5])
+def test_missing_or_nonsense_weights_yield_nothing(bad):
+    assert implied_outside_central(345.42, bad, 436.15, 125996) is None
+    assert implied_outside_central(345.42, 444658, 436.15, bad) is None
+
+
+def test_national_entirely_central_yields_nothing():
+    """Nothing traded outside Central, so there is no outside price to state."""
+    assert implied_outside_central(436.15, 125996, 436.15, 125996) is None
+
+
+def test_residual_below_the_floor_yields_nothing():
+    """A sliver of a remainder turns rounding noise into a wild price.
+
+    Both averages are published to the cent, so dividing their product
+    difference by a few hundred pounds amplifies half a cent into hundreds of
+    dollars. The floor is what stops that reaching the page.
+    """
+    just_under = 125996 + MIN_RESIDUAL_POUNDS - 1
+    assert implied_outside_central(345.42, just_under, 436.15, 125996) is None
+    just_over = 125996 + MIN_RESIDUAL_POUNDS
+    assert implied_outside_central(345.42, just_over, 436.15, 125996) is not None
+
+
+def test_central_heavier_than_national_yields_nothing():
+    """Impossible -- National includes Central. Refuse rather than go negative."""
+    assert implied_outside_central(345.42, 100000, 436.15, 125996) is None
 
 
 def test_prev_and_offset_mix_in_one_call():
