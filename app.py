@@ -309,7 +309,12 @@ def fetch_us_fresh90() -> pd.DataFrame:
     return out.sort_values("report_date").reset_index(drop=True)
 
 
-@st.cache_data(ttl=21600, persist="disk", show_spinner=False)
+# No persist="disk" here. Streamlit ignores a TTL on a disk-persisted cache --
+# its own local_disk_cache_storage.py warns "has a TTL that will be ignored" --
+# and the disk layer never expires, so a persisted entry is served for the life
+# of the container however long the TTL says. This pull is ~19MB/8s, cheap
+# enough that a TTL which actually works beats a fast start on a stale number.
+@st.cache_data(ttl=21600, show_spinner=False)
 def fetch_us_weekly90() -> pd.DataFrame:
     """Full-history weekly US Chemical Lean, Fresh 90% national average (LM_XB460).
 
@@ -348,7 +353,9 @@ def fetch_us_weekly90() -> pd.DataFrame:
     return df[cols].reset_index(drop=True)
 
 
-@st.cache_data(ttl=21600, persist="disk", show_spinner=False)
+# Same reasoning as fetch_us_weekly90: a persisted cache ignores its TTL, and
+# this pull is only a few MB.
+@st.cache_data(ttl=21600, show_spinner=False)
 def fetch_import_cow90() -> pd.DataFrame:
     """Full-history weekly Cow Meat (90%) import prices by origin from NW_LS421 (Import Beef Trade)."""
     hi = (datetime.now() + timedelta(days=2)).strftime("%m/%d/%Y")
@@ -430,7 +437,9 @@ with st.sidebar:
         'Import Beef Trade (<b>NW_LS421</b>), &quot;Cow Meat (90%)&quot; line by country of origin — '
         'the accepted proxy for import Frozen 90s. Published weekly, Fridays. Values average across '
         'East/West Coast and 0–15 / 16–45 day delivery windows reported that week.<br><br>'
-        'Cache: US 1 hr, imports 6 hr.</div>',
+        'Cache: the weekly and import pulls refresh every 6 hr. The US daily history is '
+        'held for the whole session — Streamlit ignores a TTL on a disk-persisted cache — '
+        'so use <b>Refresh now</b> to force it.</div>',
         unsafe_allow_html=True,
     )
 
@@ -812,19 +821,32 @@ else:
 # ── Data Tables ────────────────────────────────────────────────────────────────
 
 with st.expander("📋  US Fresh 90s — data table"):
-    disp = us_hist.copy()
+    # Project explicitly rather than copying the frame. The previous version
+    # renamed whatever columns it happened to find, so central_low/central_high/
+    # central_pounds shipped to clients as raw snake_case at six decimals the
+    # moment they were added to the fetch. Naming the columns here means a new
+    # one cannot appear uninvited, and a removed one raises instead of quietly
+    # disappearing from the table.
+    disp = us_hist[[
+        "report_date",
+        "national", "national_low", "national_high", "national_trades", "national_pounds",
+        "central", "central_low", "central_high", "central_trades", "central_pounds",
+    ]].copy()
     disp["report_date"] = disp["report_date"].dt.strftime("%Y-%m-%d")
     disp = disp.rename(columns={
         "report_date": "Date", "national": "National ($/cwt)",
         "national_low": "National low", "national_high": "National high",
         "national_trades": "National trades", "national_pounds": "National lb",
-        "central": "Central ($/cwt)", "central_trades": "Central trades",
+        "central": "Central ($/cwt)",
+        "central_low": "Central low", "central_high": "Central high",
+        "central_trades": "Central trades", "central_pounds": "Central lb",
     }).sort_values("Date", ascending=False).reset_index(drop=True)
     st.dataframe(
         disp.style.format({
             "National ($/cwt)": "${:.2f}", "Central ($/cwt)": "${:.2f}",
             "National low": "${:.2f}", "National high": "${:.2f}",
-            "National lb": "{:,.0f}",
+            "Central low": "${:.2f}", "Central high": "${:.2f}",
+            "National lb": "{:,.0f}", "Central lb": "{:,.0f}",
             "National trades": "{:.0f}", "Central trades": "{:.0f}",
         }, na_rep="—"),
         width="stretch", height=320,
