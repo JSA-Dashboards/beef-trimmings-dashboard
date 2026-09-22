@@ -218,6 +218,21 @@ def _num(v, spec):
         return "—"
 
 
+def _money(v):
+    """Format a price for a data table; a blank becomes a dash.
+
+    Columns are mapped through this BEFORE they reach the grid rather than
+    formatted by it, because st.dataframe resolves a null cell to the literal
+    "None" without ever consulting a Styler's formatter or its na_rep.
+    """
+    return "—" if pd.isna(v) else f"${v:,.2f}"
+
+
+def _count(v):
+    """Format a trade count or a weight for a data table. See _money."""
+    return "—" if pd.isna(v) else f"{v:,.0f}"
+
+
 def ctx_row(label, trades, pounds, low, high, avg, cls=""):
     """One region's line in the breakdown table."""
     rng = "—"
@@ -841,16 +856,19 @@ with st.expander("📋  US Fresh 90s — data table"):
         "central_low": "Central low", "central_high": "Central high",
         "central_trades": "Central trades", "central_pounds": "Central lb",
     }).sort_values("Date", ascending=False).reset_index(drop=True)
-    st.dataframe(
-        disp.style.format({
-            "National ($/cwt)": "${:.2f}", "Central ($/cwt)": "${:.2f}",
-            "National low": "${:.2f}", "National high": "${:.2f}",
-            "Central low": "${:.2f}", "Central high": "${:.2f}",
-            "National lb": "{:,.0f}", "Central lb": "{:,.0f}",
-            "National trades": "{:.0f}", "Central trades": "{:.0f}",
-        }, na_rep="—"),
-        width="stretch", height=320,
-    )
+    # Format to strings up front rather than leaving it to the grid. An unpriced
+    # session rendered as the literal "None" because st.dataframe resolves a null
+    # cell before either a Styler's formatter or its na_rep is consulted -- both
+    # were tried against the running app, and a NumberColumn config collapsed the
+    # grid instead. Mapping the columns is the only approach that reliably puts a
+    # chosen character in an empty cell. The cost is that these columns then sort
+    # as text; this is a date-ordered reference table, so that is the cheaper loss.
+    for _c in ("National ($/cwt)", "National low", "National high",
+               "Central ($/cwt)", "Central low", "Central high"):
+        disp[_c] = disp[_c].map(_money)
+    for _c in ("National trades", "National lb", "Central trades", "Central lb"):
+        disp[_c] = disp[_c].map(_count)
+    st.dataframe(disp, width="stretch", height=320)
     st.markdown(
         '<div class="note">Low and high are the day’s national price range. A range far wider '
         'than usual, or a national average well away from the Central line, means the average is '
@@ -868,12 +886,10 @@ with st.expander("📋  US Fresh 90s — weekly average (LM_XB460)"):
             "report_date": "Week ending", "weekly": "National avg ($/cwt)",
             "weekly_trades": "Trades", "weekly_pounds": "Pounds",
         }).sort_values("Week ending", ascending=False).reset_index(drop=True)
-        st.dataframe(
-            wdisp.style.format({
-                "National avg ($/cwt)": "${:.2f}", "Trades": "{:.0f}", "Pounds": "{:,.0f}",
-            }, na_rep="—"),
-            width="stretch", height=320,
-        )
+        for _c, _f in (("National avg ($/cwt)", _money),
+                       ("Trades", _count), ("Pounds", _count)):
+            wdisp[_c] = wdisp[_c].map(_f)
+        st.dataframe(wdisp, width="stretch", height=320)
 
 with st.expander("📋  Import Cow Meat (90%) — weekly data table"):
     disp = imp_hist.copy()
@@ -882,12 +898,9 @@ with st.expander("📋  Import Cow Meat (90%) — weekly data table"):
         "report_date": "Week of", "origin": "Origin", "avg_price": "Avg ($/cwt)",
         "low": "Low ($/cwt)", "high": "High ($/cwt)", "n": "Rows avg'd",
     }).sort_values("Week of", ascending=False).reset_index(drop=True)
-    st.dataframe(
-        disp.style.format({
-            "Avg ($/cwt)": "${:.2f}", "Low ($/cwt)": "${:.2f}", "High ($/cwt)": "${:.2f}",
-        }, na_rep="—"),
-        width="stretch", height=320,
-    )
+    for _c in ("Avg ($/cwt)", "Low ($/cwt)", "High ($/cwt)"):
+        disp[_c] = disp[_c].map(_money)
+    st.dataframe(disp, width="stretch", height=320)
 
 
 # ── Legal Disclaimer Footer ───────────────────────────────────────────────────
