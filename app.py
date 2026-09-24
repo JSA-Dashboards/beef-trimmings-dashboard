@@ -117,14 +117,14 @@ st.markdown(f"""
      hidden Streamlit tab is hidden and not skipped -- its body still runs every
      rerun, which would mean both fetches on every load. Same look, half the work.
 
-     The top margin clears the portal shell's sticky nav bar: that bar is 60px,
-     opaque and z-index 999990, while .block-container above forces padding-top
-     to 0.75rem, so the first ~48px of this page renders UNDERNEATH it. The
-     masthead never showed that because it is tall enough to read anyway; a 32px
-     control up there vanished completely. In the standalone twin the shell
-     header is hidden, where this simply reads as top padding. */
+     It sits directly under the masthead's blue rule, so it needs no top margin
+     of its own. (When it briefly sat at the very top of the page it did: the
+     portal shell's nav bar is 60px, opaque and z-index 999990, while
+     .block-container forces padding-top to 0.75rem, so the first ~48px of this
+     page renders underneath it. The masthead is tall enough to read regardless;
+     a 32px control up there vanished entirely.) */
   [data-testid="stButtonGroup"] {{
-    margin:3.5rem 0 20px 0;
+    margin:0 0 18px 0;
     border-bottom:1px solid {BORDER};
     gap:0 !important;
   }}
@@ -159,17 +159,20 @@ st.markdown(f"""
   .stDeployButton, [data-testid="stToolbar"] {{ display:none !important; }}
 
   .stApp {{ background-color:#ffffff; }}
-  .block-container {{ padding-top:0.75rem !important; max-width:1250px; }}
+  /* padding-top was 0.75rem, which removed the space Streamlit reserves for
+     the app header -- a 60px opaque bar at z-index 999990. Anything in the top
+     ~48px of this page rendered underneath it. The masthead survived because
+     it is tall, but its right-hand meta is short: the "US daily" line sat
+     behind the bar with nothing to show it had gone. The offset belongs here,
+     on the block, rather than on .dash-header -- a margin there moves only the
+     left column and leaves the meta behind. */
+  .block-container {{ padding-top:4.5rem !important; max-width:1250px; }}
 
   [data-testid="stSidebar"] {{ background-color:#f6f8fa; border-right:1px solid {BORDER}; }}
 
   .dash-header {{
     background:#ffffff; border-bottom:3px solid {JPSI_BLUE};
-    /* margin-top was -0.75rem so the masthead hugged the top of the page. The
-       view switch now sits above it, and that negative pull dragged the header
-       over the control -- it rendered and was "visible" to the DOM, but was
-       covered and unclickable. */
-    padding:16px 8px 14px 8px; margin:0 0 22px 0;
+    padding:16px 8px 14px 8px; margin:0 0 0 0;
     display:flex; align-items:center; gap:20px;
   }}
   .dash-header-logo img {{ height:48px; display:block; }}
@@ -662,6 +665,16 @@ def render_quota(quota_fills) -> None:
             )
 
 
+# ── Header slot ──────────────────────────────────────────────────────────────
+# Claimed BEFORE the switch so the masthead and its blue rule render above the
+# tabs, the way the Index page lays out. It is filled further down, once the
+# selected view is known and -- on the price view -- once the data behind the
+# meta has loaded. A container holds its position in the layout, so writing
+# into it later still lands here rather than at the bottom of the page.
+
+_header = st.container()
+
+
 # ── View switch ──────────────────────────────────────────────────────────────
 # The quota asks a different question from the price page -- how much of a
 # policy window is being used, not where the market is -- and it reads a
@@ -671,7 +684,7 @@ def render_quota(quota_fills) -> None:
 # never runs. That is the real reason this is a switch and not a tab -- a
 # hidden Streamlit tab still executes.
 
-VIEW_PRICES = "Prices"
+VIEW_PRICES = "US/World 90s"
 # 300,000 METRIC TONS. Not "kmt" -- that would read as 300,000 thousand tonnes,
 # a thousandfold overstatement of the quota on a client-facing label.
 VIEW_QUOTA = "300,000 mt Tariff-free beef"
@@ -682,10 +695,11 @@ _view = st.segmented_control(
 ) or VIEW_PRICES          # deselecting the active segment returns None
 
 if _view == VIEW_QUOTA:
-    st.markdown(header_html(
-        "Proclamation 11059 &mdash; 300,000 mt of tariff-free lean trimmings "
-        "for other countries, Sep 1 &ndash; Nov 30, in three monthly tranches"),
-        unsafe_allow_html=True)
+    with _header:
+        st.markdown(header_html(
+            "Proclamation 11059 &mdash; 300,000 mt of tariff-free lean trimmings "
+            "for other countries, Sep 1 &ndash; Nov 30, in three monthly tranches"),
+            unsafe_allow_html=True)
     with st.spinner("Reading CBP's weekly quota reports…"):
         try:
             _quota_fills = fetch_quota_fills()
@@ -718,11 +732,15 @@ with st.spinner("Loading full USDA beef trimmings history (US pull can take ~60-
 
 # ── Header ───────────────────────────────────────────────────────────────────
 
-c1, c2 = st.columns([7, 3])
-with c1:
-    st.markdown(header_html(
-        "US Fresh 90s (Chemical Lean) vs. South America &amp; Australia/NZ "
-        "Frozen 90s (Cow Meat)"), unsafe_allow_html=True)
+# Into the slot claimed above the switch, so this lands above the tabs. The
+# columns keep their position, so the `with c2:` further down still fills the
+# right-hand meta here rather than at the bottom of the page.
+with _header:
+    c1, c2 = st.columns([7, 3])
+    with c1:
+        st.markdown(header_html(
+            "US Fresh 90s (Chemical Lean) vs. South America &amp; Australia/NZ "
+            "Frozen 90s (Cow Meat)"), unsafe_allow_html=True)
 
 if not load_ok:
     st.warning(
