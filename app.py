@@ -111,14 +111,44 @@ st.markdown(f"""
     font-family: 'Material Symbols Rounded' !important;
   }}
 
-  /* The view switch. The top margin clears the portal shell's sticky nav bar,
-     which is 60px, opaque and z-index 999990, while .block-container above
-     forces padding-top to 0.75rem -- so the first ~48px of this page renders
-     UNDERNEATH it. The masthead never showed that because it is tall enough to
-     read anyway; a 32px control sitting up there vanished completely.
-     In the standalone twin that header is hidden, where this just reads as
-     top padding. */
-  [data-testid="stButtonGroup"] {{ margin:3.5rem 0 6px 0; }}
+  /* The view switch, dressed as a tab bar to match the CME Feeder Cattle Index
+     page: underline on the active item, no pill, no box. It stays an
+     st.segmented_control underneath rather than becoming st.tabs, because a
+     hidden Streamlit tab is hidden and not skipped -- its body still runs every
+     rerun, which would mean both fetches on every load. Same look, half the work.
+
+     The top margin clears the portal shell's sticky nav bar: that bar is 60px,
+     opaque and z-index 999990, while .block-container above forces padding-top
+     to 0.75rem, so the first ~48px of this page renders UNDERNEATH it. The
+     masthead never showed that because it is tall enough to read anyway; a 32px
+     control up there vanished completely. In the standalone twin the shell
+     header is hidden, where this simply reads as top padding. */
+  [data-testid="stButtonGroup"] {{
+    margin:3.5rem 0 20px 0;
+    border-bottom:1px solid {BORDER};
+    gap:0 !important;
+  }}
+  [data-testid="stButtonGroup"] > div {{ gap:0 !important; }}
+  [data-testid="stButtonGroup"] button[data-variant="segmented_control"] {{
+    background:transparent !important;
+    border:none !important;
+    border-bottom:2px solid transparent !important;
+    border-radius:0 !important;
+    box-shadow:none !important;
+    color:{JPSI_DARK} !important;
+    font-size:0.95rem !important;
+    font-weight:400 !important;
+    padding:6px 18px 9px 18px !important;
+    margin:0 !important;
+  }}
+  [data-testid="stButtonGroup"] button[data-variant="segmented_control"]:hover {{
+    color:{JPSI_BLUE} !important;
+  }}
+  [data-testid="stButtonGroup"] button[aria-checked="true"] {{
+    color:{JPSI_BLUE} !important;
+    border-bottom-color:{JPSI_BLUE} !important;
+    font-weight:600 !important;
+  }}
 
   header[data-testid="stHeader"] {{ display:none !important; }}
   #MainMenu, footer {{ visibility:hidden !important; }}
@@ -642,7 +672,9 @@ def render_quota(quota_fills) -> None:
 # hidden Streamlit tab still executes.
 
 VIEW_PRICES = "Prices"
-VIEW_QUOTA = "Tariff-free quota"
+# 300,000 METRIC TONS. Not "kmt" -- that would read as 300,000 thousand tonnes,
+# a thousandfold overstatement of the quota on a client-facing label.
+VIEW_QUOTA = "300,000 mt Tariff-free beef"
 
 _view = st.segmented_control(
     "View", (VIEW_PRICES, VIEW_QUOTA), default=VIEW_PRICES,
