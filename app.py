@@ -111,9 +111,22 @@ st.markdown(f"""
     font-family: 'Material Symbols Rounded' !important;
   }}
 
+  /* The view switch. The top margin clears the portal shell's sticky nav bar,
+     which is 60px, opaque and z-index 999990, while .block-container above
+     forces padding-top to 0.75rem -- so the first ~48px of this page renders
+     UNDERNEATH it. The masthead never showed that because it is tall enough to
+     read anyway; a 32px control sitting up there vanished completely.
+     In the standalone twin that header is hidden, where this just reads as
+     top padding. */
+  [data-testid="stButtonGroup"] {{ margin:3.5rem 0 6px 0; }}
+
   header[data-testid="stHeader"] {{ display:none !important; }}
   #MainMenu, footer {{ visibility:hidden !important; }}
-  .stDeployButton {{ display:none; }}
+  /* .stDeployButton is a stale selector on current Streamlit -- the button now
+     lives inside stToolbar, which also spans the top strip and painted over
+     the view switch. The switch rendered, reported itself visible, and
+     elementFromPoint still returned the toolbar. Hide the toolbar itself. */
+  .stDeployButton, [data-testid="stToolbar"] {{ display:none !important; }}
 
   .stApp {{ background-color:#ffffff; }}
   .block-container {{ padding-top:0.75rem !important; max-width:1250px; }}
@@ -122,7 +135,11 @@ st.markdown(f"""
 
   .dash-header {{
     background:#ffffff; border-bottom:3px solid {JPSI_BLUE};
-    padding:16px 8px 14px 8px; margin:-0.75rem 0 22px 0;
+    /* margin-top was -0.75rem so the masthead hugged the top of the page. The
+       view switch now sits above it, and that negative pull dragged the header
+       over the control -- it rendered and was "visible" to the DOM, but was
+       covered and unclickable. */
+    padding:16px 8px 14px 8px; margin:0 0 22px 0;
     display:flex; align-items:center; gap:20px;
   }}
   .dash-header-logo img {{ height:48px; display:block; }}
@@ -220,6 +237,17 @@ def _num(v, spec):
         return spec.format(v)
     except (TypeError, ValueError):
         return "—"
+
+
+def header_html(subtitle: str) -> str:
+    """The page banner. Shared so both views carry the same masthead and only
+    the subtitle changes -- duplicating it is how the two drift apart."""
+    return ('<div class="dash-header">'
+            f'<div class="dash-header-logo"><img src="{JSA_LOGO}"></div>'
+            '<div class="dash-header-text">'
+            '<h1>Beef Trimmings Dashboard</h1>'
+            f'<div class="subtitle">{subtitle}</div>'
+            '</div></div>')
 
 
 def _money(v):
@@ -502,6 +530,139 @@ with st.sidebar:
     )
 
 
+def render_quota(quota_fills) -> None:
+    """The whole tariff-free quota view. Lives behind the switch at the top."""
+    if not quota_fills:
+        st.markdown(
+            '<div class="note">CBP quota fill is unavailable right now. It is scraped '
+            'from the weekly Commodity Status Report PDF, which has no API.</div>',
+            unsafe_allow_html=True,
+        )
+    else:
+        _latest = quota_fills[-1]
+        _tr = qtr.tranche_for(_latest.period_start)
+        _same = [f for f in quota_fills if f.period_start == _latest.period_start]
+        _rate = qtr.pace(_same)
+        _proj = qtr.project_final(_same, _tr) if _tr else None
+        _left = (_tr.end - _latest.as_of).days if _tr else None
+
+        cols = st.columns(4)
+        with cols[0]:
+            st.markdown(tile(
+                f"Tranche {_tr.number} filled" if _tr else "Filled",
+                f"{_latest.fill_pct:.1f}%",
+                f'<div class="tile-delta-neu">{_latest.entered_kg * qtr.MT_PER_KG:,.0f} '
+                f'of {_latest.limit_kg * qtr.MT_PER_KG:,.0f} mt</div>',
+                "tile-us"), unsafe_allow_html=True)
+        with cols[1]:
+            st.markdown(tile(
+                "Days left in tranche",
+                "—" if _left is None else f"{max(_left, 0):,.0f}",
+                f'<div class="tile-delta-neu">closes {_tr.end:%b %d}</div>' if _tr else "",
+                "tile-neu"), unsafe_allow_html=True)
+        with cols[2]:
+            # Unit goes in the sub-line: "1,212 mt/day" is wide enough to wrap
+            # mid-word in a fifth-width tile.
+            st.markdown(tile(
+                "Pace",
+                "—" if _rate is None else f"{_rate * qtr.MT_PER_KG:,.0f}",
+                f'<div class="tile-delta-neu">mt/day since {_same[0].as_of:%b %d}</div>'
+                if len(_same) > 1 else '<div class="tile-delta-neu">one report so far</div>',
+                "tile-neu"), unsafe_allow_html=True)
+        with cols[3]:
+            _unused = (_tr.limit_kg - _proj) * qtr.MT_PER_KG if (_proj is not None and _tr) else None
+            st.markdown(tile(
+                "Projected at close",
+                "—" if _proj is None else f"{_proj / _tr.limit_kg * 100:.0f}%",
+                f'<div class="tile-delta-neg">{_unused:,.0f} mt expires unused</div>'
+                if _unused and _unused > 0 else "",
+                "tile-us"), unsafe_allow_html=True)
+
+        st.markdown(
+            '<div class="note" style="margin-top:6px;">'
+            'Three separate <b>100,000 mt</b> tranches, not one 300,000 mt pool: '
+            'Sep 1–30, Oct 1–30, Oct 31–Nov 30. Each is first come, first served, and '
+            'CBP prorates rather than carrying a shortfall forward — whatever a tranche '
+            'does not use simply expires. <b>Argentina is not in this quota</b>; it has its '
+            'own. Pace and projection are straight-line from the first report of the '
+            'current tranche and assume no change in entry behaviour.</div>',
+            unsafe_allow_html=True,
+        )
+
+        with st.expander("Quota detail — tranches, weekly fill, and what it does not cover"):
+            _rows = []
+            for _t in qtr.TRANCHES:
+                _obs = [f for f in quota_fills if f.period_start == _t.start]
+                _last = _obs[-1] if _obs else None
+                if _last is None:
+                    _state, _filled = "not yet reported", "—"
+                else:
+                    _state = "filled" if _last.status == "FILL" else "open"
+                    _filled = f"{_last.fill_pct:.2f}%"
+                _rows.append(
+                    "<tr><td>Tranche {n}</td><td>{win}</td><td>{lim:,.0f}</td>"
+                    "<td>{state}</td><td>{filled}</td></tr>".format(
+                        n=_t.number,
+                        win=f"{_t.start:%b %d} – {_t.end:%b %d}",
+                        lim=_t.limit_kg * qtr.MT_PER_KG,
+                        state=_state, filled=_filled))
+            st.markdown(
+                '<table class="ctx"><thead><tr><th>Tranche</th><th>Window</th>'
+                '<th>Limit (mt)</th><th>Status</th><th>Filled</th></tr></thead><tbody>'
+                + "".join(_rows) + "</tbody></table>",
+                unsafe_allow_html=True,
+            )
+            _wk = pd.DataFrame(
+                [{"Report date": f.as_of.strftime("%Y-%m-%d"),
+                  "Tranche": (qtr.tranche_for(f.period_start).number
+                              if qtr.tranche_for(f.period_start) else "—"),
+                  "Entered (mt)": _count(f.entered_kg * qtr.MT_PER_KG),
+                  "Filled": f"{f.fill_pct:.2f}%",
+                  "Status": f.status}
+                 for f in reversed(quota_fills)])
+            st.dataframe(_wk, width="stretch", height=240)
+            st.markdown(
+                '<div class="note">Source: CBP Commodity Status Report, quota '
+                '<b>0299035402BEEF</b>, HTS 0201.30.5091/5097 and 0202.30.5091/5097, '
+                'published weekly as a PDF. Proclamation 11059 (91 FR 55989). This line '
+                'covers "other countries or areas" only — Argentine volume enters under '
+                'its own quotas and is not counted here, and the ordinary other-countries '
+                'beef TRQ filled on 2026-01-06, which is the gap this opens.</div>',
+                unsafe_allow_html=True,
+            )
+
+
+# ── View switch ──────────────────────────────────────────────────────────────
+# The quota asks a different question from the price page -- how much of a
+# policy window is being used, not where the market is -- and it reads a
+# different source. Behind a switch, the price page renders exactly as it
+# always has, and neither view pays for the other's fetch: on the quota view
+# the ~175MB LM_XB401 pull never runs, and on the price view the CBP PDF scrape
+# never runs. That is the real reason this is a switch and not a tab -- a
+# hidden Streamlit tab still executes.
+
+VIEW_PRICES = "Prices"
+VIEW_QUOTA = "Tariff-free quota"
+
+_view = st.segmented_control(
+    "View", (VIEW_PRICES, VIEW_QUOTA), default=VIEW_PRICES,
+    label_visibility="collapsed", key="bt_view",
+) or VIEW_PRICES          # deselecting the active segment returns None
+
+if _view == VIEW_QUOTA:
+    st.markdown(header_html(
+        "Proclamation 11059 &mdash; 300,000 mt of tariff-free lean trimmings "
+        "for other countries, Sep 1 &ndash; Nov 30, in three monthly tranches"),
+        unsafe_allow_html=True)
+    with st.spinner("Reading CBP's weekly quota reports…"):
+        try:
+            _quota_fills = fetch_quota_fills()
+        except Exception:
+            _quota_fills = []
+    render_quota(_quota_fills)
+    st.stop()
+
+
 # ── Load Data ────────────────────────────────────────────────────────────────
 
 with st.spinner("Loading full USDA beef trimmings history (US pull can take ~60-90s on a cold cache)…"):
@@ -522,27 +683,14 @@ with st.spinner("Loading full USDA beef trimmings history (US pull can take ~60-
         us_weekly = pd.DataFrame(
             columns=["report_date", "weekly", "weekly_trades", "weekly_pounds"])
 
-    # Quota fill is a third-party PDF scrape and the most fragile source on the
-    # page, so it degrades to nothing rather than taking the prices down with it.
-    try:
-        quota_fills = fetch_quota_fills()
-    except Exception:
-        quota_fills = []
-
 
 # ── Header ───────────────────────────────────────────────────────────────────
 
 c1, c2 = st.columns([7, 3])
 with c1:
-    st.markdown(
-        '<div class="dash-header">'
-        f'<div class="dash-header-logo"><img src="{JSA_LOGO}"></div>'
-        '<div class="dash-header-text">'
-        '<h1>Beef Trimmings Dashboard</h1>'
-        '<div class="subtitle">US Fresh 90s (Chemical Lean) vs. South America &amp; Australia/NZ Frozen 90s (Cow Meat)</div>'
-        '</div></div>',
-        unsafe_allow_html=True,
-    )
+    st.markdown(header_html(
+        "US Fresh 90s (Chemical Lean) vs. South America &amp; Australia/NZ "
+        "Frozen 90s (Cow Meat)"), unsafe_allow_html=True)
 
 if not load_ok:
     st.warning(
@@ -698,113 +846,6 @@ with st.expander("What’s behind this print — trades, Central vs National, pr
         )
 
 # ── Tiles — South America Frozen 90s ─────────────────────────────────────────
-
-# ── Tariff-free import quota (Proclamation 11059) ────────────────────────────
-
-st.markdown(
-    '<div class="sec-header">Tariff-free import quota — lean trimmings, '
-    'ex-Argentina (Proclamation 11059)</div>',
-    unsafe_allow_html=True,
-)
-
-if not quota_fills:
-    st.markdown(
-        '<div class="note">CBP quota fill is unavailable right now. It is scraped '
-        'from the weekly Commodity Status Report PDF, which has no API.</div>',
-        unsafe_allow_html=True,
-    )
-else:
-    _latest = quota_fills[-1]
-    _tr = qtr.tranche_for(_latest.period_start)
-    _same = [f for f in quota_fills if f.period_start == _latest.period_start]
-    _rate = qtr.pace(_same)
-    _proj = qtr.project_final(_same, _tr) if _tr else None
-    _left = (_tr.end - _latest.as_of).days if _tr else None
-
-    cols = st.columns(4)
-    with cols[0]:
-        st.markdown(tile(
-            f"Tranche {_tr.number} filled" if _tr else "Filled",
-            f"{_latest.fill_pct:.1f}%",
-            f'<div class="tile-delta-neu">{_latest.entered_kg * qtr.MT_PER_KG:,.0f} '
-            f'of {_latest.limit_kg * qtr.MT_PER_KG:,.0f} mt</div>',
-            "tile-us"), unsafe_allow_html=True)
-    with cols[1]:
-        st.markdown(tile(
-            "Days left in tranche",
-            "—" if _left is None else f"{max(_left, 0):,.0f}",
-            f'<div class="tile-delta-neu">closes {_tr.end:%b %d}</div>' if _tr else "",
-            "tile-neu"), unsafe_allow_html=True)
-    with cols[2]:
-        # Unit goes in the sub-line: "1,212 mt/day" is wide enough to wrap
-        # mid-word in a fifth-width tile.
-        st.markdown(tile(
-            "Pace",
-            "—" if _rate is None else f"{_rate * qtr.MT_PER_KG:,.0f}",
-            f'<div class="tile-delta-neu">mt/day since {_same[0].as_of:%b %d}</div>'
-            if len(_same) > 1 else '<div class="tile-delta-neu">one report so far</div>',
-            "tile-neu"), unsafe_allow_html=True)
-    with cols[3]:
-        _unused = (_tr.limit_kg - _proj) * qtr.MT_PER_KG if (_proj is not None and _tr) else None
-        st.markdown(tile(
-            "Projected at close",
-            "—" if _proj is None else f"{_proj / _tr.limit_kg * 100:.0f}%",
-            f'<div class="tile-delta-neg">{_unused:,.0f} mt expires unused</div>'
-            if _unused and _unused > 0 else "",
-            "tile-us"), unsafe_allow_html=True)
-
-    st.markdown(
-        '<div class="note" style="margin-top:6px;">'
-        'Three separate <b>100,000 mt</b> tranches, not one 300,000 mt pool: '
-        'Sep 1–30, Oct 1–30, Oct 31–Nov 30. Each is first come, first served, and '
-        'CBP prorates rather than carrying a shortfall forward — whatever a tranche '
-        'does not use simply expires. <b>Argentina is not in this quota</b>; it has its '
-        'own. Pace and projection are straight-line from the first report of the '
-        'current tranche and assume no change in entry behaviour.</div>',
-        unsafe_allow_html=True,
-    )
-
-    with st.expander("Quota detail — tranches, weekly fill, and what it does not cover"):
-        _rows = []
-        for _t in qtr.TRANCHES:
-            _obs = [f for f in quota_fills if f.period_start == _t.start]
-            _last = _obs[-1] if _obs else None
-            if _last is None:
-                _state, _filled = "not yet reported", "—"
-            else:
-                _state = "filled" if _last.status == "FILL" else "open"
-                _filled = f"{_last.fill_pct:.2f}%"
-            _rows.append(
-                "<tr><td>Tranche {n}</td><td>{win}</td><td>{lim:,.0f}</td>"
-                "<td>{state}</td><td>{filled}</td></tr>".format(
-                    n=_t.number,
-                    win=f"{_t.start:%b %d} – {_t.end:%b %d}",
-                    lim=_t.limit_kg * qtr.MT_PER_KG,
-                    state=_state, filled=_filled))
-        st.markdown(
-            '<table class="ctx"><thead><tr><th>Tranche</th><th>Window</th>'
-            '<th>Limit (mt)</th><th>Status</th><th>Filled</th></tr></thead><tbody>'
-            + "".join(_rows) + "</tbody></table>",
-            unsafe_allow_html=True,
-        )
-        _wk = pd.DataFrame(
-            [{"Report date": f.as_of.strftime("%Y-%m-%d"),
-              "Tranche": (qtr.tranche_for(f.period_start).number
-                          if qtr.tranche_for(f.period_start) else "—"),
-              "Entered (mt)": _count(f.entered_kg * qtr.MT_PER_KG),
-              "Filled": f"{f.fill_pct:.2f}%",
-              "Status": f.status}
-             for f in reversed(quota_fills)])
-        st.dataframe(_wk, width="stretch", height=240)
-        st.markdown(
-            '<div class="note">Source: CBP Commodity Status Report, quota '
-            '<b>0299035402BEEF</b>, HTS 0201.30.5091/5097 and 0202.30.5091/5097, '
-            'published weekly as a PDF. Proclamation 11059 (91 FR 55989). This line '
-            'covers "other countries or areas" only — Argentine volume enters under '
-            'its own quotas and is not counted here, and the ordinary other-countries '
-            'beef TRQ filled on 2026-01-06, which is the gap this opens.</div>',
-            unsafe_allow_html=True,
-        )
 
 st.markdown('<div class="sec-header">South America Frozen 90s — Cow Meat, avg. E/W Coast ($/cwt)</div>', unsafe_allow_html=True)
 cols = st.columns(4)
