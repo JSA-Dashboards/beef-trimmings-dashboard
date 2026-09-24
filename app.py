@@ -908,7 +908,7 @@ with st.expander("📋  Import Cow Meat (90%) — weekly data table"):
 _disclaimer_year = datetime.now().year
 st.markdown("<hr style='border-color:#3a3a3a;margin-top:32px;margin-bottom:16px'>", unsafe_allow_html=True)
 st.markdown(
-    f'<div style="font-family:inherit;color:#888;font-size:0.68rem;line-height:1.6;text-align:center;padding:0 24px 24px;">'
+    f'<div style="font-family:inherit;color:#888;font-size:inherit;line-height:1.6;text-align:center;padding:0 24px 24px;">'
     f'Trading commodity futures, options on futures, cash commodities, and over-the-counter derivative products involves substantial risk of loss and may not be suitable for all investors. '
     f'This communication is provided for informational purposes only and does not constitute investment advice, a recommendation, or an offer or solicitation to buy or sell any futures, options, cash commodities, or derivative products. '
     f'John Stewart &amp; Associates, Inc. does not accept orders to buy or sell any financial instruments via email. '
