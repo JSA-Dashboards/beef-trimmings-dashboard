@@ -617,10 +617,34 @@ def render_quota(quota_fills) -> None:
             'Sep 1–30, Oct 1–30, Oct 31–Nov 30. Each is first come, first served, and '
             'CBP prorates rather than carrying a shortfall forward — whatever a tranche '
             'does not use simply expires. <b>Argentina is not in this quota</b>; it has its '
-            'own. Pace and projection are straight-line from the first report of the '
-            'current tranche and assume no change in entry behaviour.</div>',
+            'own.</div>',
             unsafe_allow_html=True,
         )
+
+        # Spell the pace out with its own arithmetic rather than leaving
+        # "1,212 mt/day" to be taken on trust -- the projection built on it is
+        # the number someone might actually trade against.
+        if _rate is not None and len(_same) > 1:
+            _span = (_latest.as_of - _same[0].as_of).days
+            st.markdown(
+                '<div class="note" style="margin-top:10px;">'
+                '<b>Pace</b> is the average since this tranche opened: '
+                f'{_latest.entered_kg:,.0f} kg entered by {_latest.as_of:%b %d}, less '
+                f'{_same[0].entered_kg:,.0f} kg by {_same[0].as_of:%b %d}, over {_span} '
+                f'days — <b>{_rate * qtr.MT_PER_KG:,.0f} mt/day</b>, about '
+                f'{qtr.loads(_rate):,.0f} truckloads a day. It spans the first report of '
+                'the tranche to the newest rather than the gap between the last two, '
+                'because CBP&rsquo;s weekly cadence slips around holidays and one short '
+                'week would otherwise read as a collapse in pace.<br><br>'
+                '<b>Projected at close</b> carries that straight line to the last day of '
+                'the tranche. It assumes entries keep arriving at the same rate, which is '
+                'likely to be <i>conservative</i>: unused quota does not carry forward, so '
+                'anyone holding product has a reason to land it before the window shuts. '
+                'Read it as &ldquo;if nothing changes&rdquo; rather than as a forecast, and '
+                'watch the next report — a jump in the daily rate this late moves the '
+                'projection quickly.</div>',
+                unsafe_allow_html=True,
+            )
 
         with st.expander("Quota detail — tranches, weekly fill, and what it does not cover"):
             _rows = []

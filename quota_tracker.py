@@ -71,6 +71,16 @@ TRANCHES = (
 
 MT_PER_KG = 0.001
 
+# A truckload is 40,000 lb. CBP reports kilograms, but the desk thinks in
+# loads, so the page quotes both.
+LB_PER_KG = 2.20462
+LOAD_LB = 40_000.0
+
+
+def loads(kg: float) -> float:
+    """Kilograms expressed as 40,000 lb truckloads."""
+    return kg * LB_PER_KG / LOAD_LB
+
 
 class Fill(NamedTuple):
     """One observation of the quota's fill, as of a report date."""

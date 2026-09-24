@@ -22,8 +22,10 @@ else:  # pragma: no cover
     raise RuntimeError("quota_tracker.py not found next to app.py")
 
 from quota_tracker import (  # noqa: E402
+    LOAD_LB,
     TRANCHES,
     Fill,
+    loads,
     pace,
     parse_fill,
     project_final,
@@ -151,6 +153,19 @@ def test_projection_says_tranche_1_does_not_fill():
     p = project_final(REAL, TRANCHES[0])
     assert p == pytest.approx(42_038_703, rel=1e-3)
     assert p / TRANCHES[0].limit_kg < 0.5
+
+
+def test_a_load_is_40000_lb_not_40000_kg():
+    """The page quotes pace in truckloads beside mt. Treating the 40,000 as
+    kilograms would understate the count by 55%."""
+    one_load_kg = LOAD_LB / 2.20462
+    assert loads(one_load_kg) == pytest.approx(1.0, rel=1e-4)
+    assert one_load_kg == pytest.approx(18_143.7, rel=1e-4)
+
+
+def test_pace_in_loads_matches_the_real_series():
+    """1,212,223 kg/day is about 67 loads, not 30."""
+    assert loads(pace(REAL)) == pytest.approx(66.8, abs=0.2)
 
 
 def test_projection_cannot_exceed_the_tranche():
