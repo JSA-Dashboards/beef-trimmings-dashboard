@@ -38,7 +38,7 @@ through the quota.
 """
 
 import re
-from datetime import date
+from datetime import date, timedelta
 from typing import NamedTuple, Optional
 
 QUOTA_ID = "0299035402BEEF"
@@ -80,6 +80,33 @@ LOAD_LB = 40_000.0
 def loads(kg: float) -> float:
     """Kilograms expressed as 40,000 lb truckloads."""
     return kg * LB_PER_KG / LOAD_LB
+
+
+# CBP posts the Commodity Status Report on the first business day of each week,
+# so a Monday federal holiday pushes it to Tuesday -- which is exactly why the
+# first report of this quota landed Tue 2026-09-08 rather than Mon 09-07.
+# Only Mondays matter here; a holiday later in the week does not move it.
+MONDAY_HOLIDAYS = frozenset({
+    date(2026, 9, 7),     # Labor Day -- report landed Tue Sep 8
+    date(2026, 10, 12),   # Columbus Day -- inside the quota window
+    date(2027, 1, 18),    # MLK Day, in case this outlives the 2026 quota
+    date(2027, 2, 15),    # Presidents' Day
+})
+
+
+def next_expected_report(after: date) -> date:
+    """When CBP's next weekly report is due after `after`.
+
+    The Monday following that date, pushed a day when that Monday is a federal
+    holiday. It is an EXPECTATION, not a promise -- CBP slips occasionally for
+    reasons no calendar predicts, which is why the page labels it "expected".
+    """
+    day = after + timedelta(days=1)
+    while day.weekday() != 0:          # 0 = Monday
+        day += timedelta(days=1)
+    while day in MONDAY_HOLIDAYS:
+        day += timedelta(days=1)
+    return day
 
 
 class Fill(NamedTuple):

@@ -579,6 +579,17 @@ def render_quota(quota_fills) -> None:
         _proj = qtr.project_final(_same, _tr) if _tr else None
         _left = (_tr.end - _latest.as_of).days if _tr else None
 
+        # Say which report these numbers come from and when the next is due.
+        # Everything below is weekly, so without this the page gives no way to
+        # tell a fresh figure from a four-day-old one.
+        st.markdown(
+            '<div class="note" style="margin:-4px 0 12px 0;">'
+            f'CBP report <b>{_latest.as_of:%b %d, %Y}</b> &nbsp;·&nbsp; next expected '
+            f'<b>{qtr.next_expected_report(_latest.as_of):%a %b %d}</b>'
+            ' &nbsp;·&nbsp; published weekly, first business day</div>',
+            unsafe_allow_html=True,
+        )
+
         cols = st.columns(4)
         with cols[0]:
             st.markdown(tile(
