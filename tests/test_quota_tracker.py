@@ -8,7 +8,7 @@ a change in CBP's layout fails here rather than silently zeroing the tracker.
 
 import os
 import sys
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 
@@ -26,6 +26,7 @@ from quota_tracker import (  # noqa: E402
     TRANCHES,
     Fill,
     loads,
+    next_expected_report,
     pace,
     parse_fill,
     project_final,
@@ -166,6 +167,37 @@ def test_a_load_is_40000_lb_not_40000_kg():
 def test_pace_in_loads_matches_the_real_series():
     """1,212,223 kg/day is about 67 loads, not 30."""
     assert loads(pace(REAL)) == pytest.approx(66.8, abs=0.2)
+
+
+# ── When the next report is due ──────────────────────────────────────────────
+
+def test_next_report_after_a_monday_is_the_following_monday():
+    """Sep 21 2026 was a Monday; the next is Sep 28, not tomorrow."""
+    assert next_expected_report(date(2026, 9, 21)) == date(2026, 9, 28)
+
+
+@pytest.mark.parametrize("day", [22, 23, 24, 25, 26, 27])
+def test_any_day_midweek_points_at_the_same_monday(day):
+    assert next_expected_report(date(2026, 9, day)) == date(2026, 9, 28)
+
+
+def test_sunday_points_at_tomorrow():
+    assert next_expected_report(date(2026, 9, 27)) == date(2026, 9, 28)
+
+
+def test_a_monday_holiday_pushes_the_report_to_tuesday():
+    """Columbus Day falls Mon 2026-10-12, inside the quota window. This is not
+    hypothetical: the first report of this quota landed Tue 2026-09-08 because
+    Mon 09-07 was Labor Day, so a naive 'next Monday' is wrong on real dates."""
+    assert next_expected_report(date(2026, 10, 5)) == date(2026, 10, 13)
+    assert next_expected_report(date(2026, 9, 1)) == date(2026, 9, 8)
+
+
+def test_never_returns_the_day_it_was_given():
+    """An 'as of' date must never suggest the next report is the same day."""
+    for offset in range(0, 21):
+        d = date(2026, 9, 1) + timedelta(days=offset)
+        assert next_expected_report(d) > d
 
 
 def test_projection_cannot_exceed_the_tranche():
