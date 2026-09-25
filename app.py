@@ -85,6 +85,12 @@ IMPORT_HISTORY_START    = "01/01/2019"
 # same National rows in ~19MB/8s instead of ~73MB/25s.
 US_WEEKLY_HISTORY_REPORTS = 1300
 
+# One constant for the weekly caches AND for the prose that quotes them. The
+# sidebar used to claim "Cache: US 1 hr, imports 6 hr" while the real behaviour
+# was nothing of the sort; a number typed into a caption drifts from the setting
+# it describes the moment either is touched.
+QUOTA_TTL_SECONDS = 21_600      # 6 hr
+
 WATERMARK_OPACITY = 0.10
 
 # ── Page Config ─────────────────────────────────────────────────────────────
@@ -394,7 +400,7 @@ def fetch_us_fresh90() -> pd.DataFrame:
 # and the disk layer never expires, so a persisted entry is served for the life
 # of the container however long the TTL says. This pull is ~19MB/8s, cheap
 # enough that a TTL which actually works beats a fast start on a stale number.
-@st.cache_data(ttl=21600, show_spinner=False)
+@st.cache_data(ttl=QUOTA_TTL_SECONDS, show_spinner=False)
 def fetch_us_weekly90() -> pd.DataFrame:
     """Full-history weekly US Chemical Lean, Fresh 90% national average (LM_XB460).
 
@@ -433,7 +439,7 @@ def fetch_us_weekly90() -> pd.DataFrame:
     return df[cols].reset_index(drop=True)
 
 
-@st.cache_data(ttl=21600, show_spinner=False)
+@st.cache_data(ttl=QUOTA_TTL_SECONDS, show_spinner=False)
 def fetch_quota_fills() -> list:
     """Weekly fill of the Proclamation 11059 quota, from CBP's PDF reports.
 
@@ -474,7 +480,7 @@ def fetch_quota_fills() -> list:
 
 # Same reasoning as fetch_us_weekly90: a persisted cache ignores its TTL, and
 # this pull is only a few MB.
-@st.cache_data(ttl=21600, show_spinner=False)
+@st.cache_data(ttl=QUOTA_TTL_SECONDS, show_spinner=False)
 def fetch_import_cow90() -> pd.DataFrame:
     """Full-history weekly Cow Meat (90%) import prices by origin from NW_LS421 (Import Beef Trade)."""
     hi = (datetime.now() + timedelta(days=2)).strftime("%m/%d/%Y")
@@ -556,7 +562,8 @@ with st.sidebar:
         'Import Beef Trade (<b>NW_LS421</b>), &quot;Cow Meat (90%)&quot; line by country of origin — '
         'the accepted proxy for import Frozen 90s. Published weekly, Fridays. Values average across '
         'East/West Coast and 0–15 / 16–45 day delivery windows reported that week.<br><br>'
-        'Cache: the weekly and import pulls refresh every 6 hr. The US daily history is '
+        f'Cache: the weekly and import pulls refresh every {QUOTA_TTL_SECONDS // 3600} hr. '
+        'The US daily history is '
         'held for the whole session — Streamlit ignores a TTL on a disk-persisted cache — '
         'so use <b>Refresh now</b> to force it.</div>',
         unsafe_allow_html=True,
@@ -690,12 +697,32 @@ def render_quota(quota_fills) -> None:
                  for f in reversed(quota_fills)])
             st.dataframe(_wk, width="stretch", height=240)
             st.markdown(
-                '<div class="note">Source: CBP Commodity Status Report, quota '
-                '<b>0299035402BEEF</b>, HTS 0201.30.5091/5097 and 0202.30.5091/5097, '
-                'published weekly as a PDF. Proclamation 11059 (91 FR 55989). This line '
-                'covers "other countries or areas" only — Argentine volume enters under '
-                'its own quotas and is not counted here, and the ordinary other-countries '
-                'beef TRQ filled on 2026-01-06, which is the gap this opens.</div>',
+                '<div class="note" style="margin-top:12px;">'
+                '<b>What the source is.</b> CBP&rsquo;s Commodity Status Report is the '
+                'official weekly record of how full every US tariff-rate quota is. It is '
+                'not a beef document &mdash; the same file covers raw sugar, apparel and '
+                'textiles. Each row gives a quota&rsquo;s limit, how much has been entered '
+                'against it, the fill percentage and its status, and it is what customs '
+                'brokers check before shipping to know whether cargo lands inside the quota '
+                'or at the over-quota tariff. This page reads one row of it: quota '
+                '<b>0299035402BEEF</b> (&ldquo;Affordable Beef&rdquo;), the <i>other '
+                'countries</i> line, covering HTS 0201.30.5091/5097 and 0202.30.5091/5097 '
+                'under Proclamation 11059 (91 FR 55989).<br><br>'
+
+                '<b>When it updates.</b> Weekly, on the first business day &mdash; Monday, '
+                'or Tuesday when Monday is a federal holiday, which is why the first report '
+                'of this quota landed Tue Sep 8 after Labor Day. The report states its date '
+                'and <i>no cutoff time</i>, so there is an unknown lag between cargo '
+                'clearing and appearing in the count; treat the figure as good to within a '
+                'few days, not to the hour. CBP keeps only the current report and four '
+                f'previous online. This page refetches every {QUOTA_TTL_SECONDS // 3600} hr, '
+                'and <b>Refresh now</b> in the sidebar forces it.<br><br>'
+
+                '<b>What it does not cover.</b> Argentine volume enters under its own quotas '
+                'and is never counted on this line. The ordinary other-countries beef TRQ '
+                '(0201101BEEF03) filled on 2026-01-06 &mdash; non-quota-country beef has '
+                'paid the over-quota rate ever since, which is the gap this proclamation '
+                'opens.</div>',
                 unsafe_allow_html=True,
             )
 
