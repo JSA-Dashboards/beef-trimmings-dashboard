@@ -1,4 +1,4 @@
-"""Proof that the Proclamation 11059 quota parser reads CBP correctly.
+﻿"""Proof that the Proclamation 11059 quota parser reads CBP correctly.
 
 Every fixture below is a verbatim line from a real Commodity Status Report, so
 a change in CBP's layout fails here rather than silently zeroing the tracker.
@@ -25,6 +25,8 @@ from quota_tracker import (  # noqa: E402
     LOAD_LB,
     TRANCHES,
     Fill,
+    current_tranche,
+    days_remaining,
     loads,
     next_expected_report,
     pace,
@@ -32,6 +34,7 @@ from quota_tracker import (  # noqa: E402
     project_final,
     report_date,
     tranche_for,
+    tranche_state,
 )
 
 
@@ -198,6 +201,44 @@ def test_never_returns_the_day_it_was_given():
     for offset in range(0, 21):
         d = date(2026, 9, 1) + timedelta(days=offset)
         assert next_expected_report(d) > d
+
+
+# ── Calendar state, which is not the same as the newest report ───────────────
+
+def test_a_tranche_is_closed_the_day_after_it_ends():
+    """2026-10-02 is the day this mattered: CBP's newest report was Sep 28 and
+    still described the Sep 1-30 window, so reading state off the report showed
+    a closed tranche as open with '2 days left'."""
+    t1 = TRANCHES[0]
+    assert tranche_state(t1, date(2026, 9, 30)) == "open", "the last day is still open"
+    assert tranche_state(t1, date(2026, 10, 1)) == "closed"
+    assert tranche_state(t1, date(2026, 10, 2)) == "closed"
+    assert tranche_state(t1, date(2026, 8, 31)) == "upcoming"
+
+
+def test_days_remaining_never_goes_negative():
+    t1 = TRANCHES[0]
+    assert days_remaining(t1, date(2026, 9, 21)) == 9
+    assert days_remaining(t1, date(2026, 9, 30)) == 0
+    assert days_remaining(t1, date(2026, 10, 2)) == 0, "a closed window is not -2 days"
+
+
+def test_current_tranche_follows_the_calendar_not_the_report():
+    assert current_tranche(date(2026, 9, 15)).number == 1
+    assert current_tranche(date(2026, 10, 2)).number == 2
+    assert current_tranche(date(2026, 10, 30)).number == 2
+    assert current_tranche(date(2026, 10, 31)).number == 3, "the Oct 30/31 boundary again"
+    assert current_tranche(date(2026, 12, 1)) is None
+    assert current_tranche(date(2026, 8, 31)) is None
+
+
+def test_reported_and_live_tranche_diverge_after_a_close():
+    """The case the page has to narrate: on Oct 2 the newest report describes
+    tranche 1 while tranche 2 is the one actually running."""
+    reported = tranche_for(date(2026, 9, 1))
+    live = current_tranche(date(2026, 10, 2))
+    assert reported.number == 1 and live.number == 2
+    assert tranche_state(reported, date(2026, 10, 2)) == "closed"
 
 
 def test_projection_cannot_exceed_the_tranche():
