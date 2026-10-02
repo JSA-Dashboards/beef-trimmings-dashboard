@@ -1044,7 +1044,13 @@ spread_us_sa  = (us_cur - sa_cur)  if (us_cur is not None and sa_cur  is not Non
 spread_us_anz = (us_cur - anz_cur) if (us_cur is not None and anz_cur is not None) else None
 spread_sa_anz = (sa_cur - anz_cur) if (sa_cur  is not None and anz_cur is not None) else None
 
-last_us_date  = us_hist["report_date"].max()  if not us_hist.empty  else None
+# The date of the latest PRICED session, not MAX(report_date). LM_XB401 carries
+# a Fresh 90% line on only two or three days a week and publishes 0.00 on the
+# rest, so the newest report date is routinely a day with no price on it. Taking
+# the max put "US daily: Sep 17" above a tile showing Sep 16's $428.00 -- the
+# header dated the price a day later than the session it came from, which is
+# the kind of wrong a reader has no way to notice.
+last_us_date  = qc.latest_priced_date(us_hist)
 last_imp_date = imp_hist["report_date"].max() if not imp_hist.empty else None
 
 with c2:
@@ -1359,7 +1365,7 @@ with st.expander("📋  US Fresh 90s — data table"):
         "national", "national_low", "national_high", "national_trades", "national_pounds",
         "central", "central_low", "central_high", "central_trades", "central_pounds",
     ]].copy()
-    disp["report_date"] = disp["report_date"].dt.strftime("%Y-%m-%d")
+    disp["report_date"] = qc.date_text(disp["report_date"])
     disp = disp.rename(columns={
         "report_date": "Date", "national": "National ($/cwt)",
         "national_low": "National low", "national_high": "National high",
@@ -1393,7 +1399,7 @@ with st.expander("📋  US Fresh 90s — weekly average (LM_XB460)"):
         st.info("Weekly LM_XB460 data is unavailable.")
     else:
         wdisp = us_weekly.copy()
-        wdisp["report_date"] = wdisp["report_date"].dt.strftime("%Y-%m-%d")
+        wdisp["report_date"] = qc.date_text(wdisp["report_date"])
         wdisp = wdisp.rename(columns={
             "report_date": "Week ending", "weekly": "National avg ($/cwt)",
             "weekly_trades": "Trades", "weekly_pounds": "Pounds",
@@ -1405,7 +1411,7 @@ with st.expander("📋  US Fresh 90s — weekly average (LM_XB460)"):
 
 with st.expander("📋  Import Cow Meat (90%) — weekly data table"):
     disp = imp_hist.copy()
-    disp["report_date"] = disp["report_date"].dt.strftime("%Y-%m-%d")
+    disp["report_date"] = qc.date_text(disp["report_date"])
     disp = disp.rename(columns={
         "report_date": "Week of", "origin": "Origin", "avg_price": "Avg ($/cwt)",
         "low": "Low ($/cwt)", "high": "High ($/cwt)", "n": "Rows avg'd",

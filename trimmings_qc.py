@@ -189,6 +189,36 @@ class _Prev:
 PREV = _Prev()
 
 
+def date_text(series):
+    """A date column rendered as YYYY-MM-DD, tolerating an empty frame.
+
+    `.dt` straight off the column looks equivalent and is not. A fetch that
+    degrades to its empty fallback returns a frame built from a column LIST, so
+    the column is object dtype, and `.dt` on object raises "Can only use .dt
+    accessor with datetimelike values" -- which took the whole page down at the
+    data table rather than rendering an empty one. Coercing first costs nothing
+    on a real column and makes the empty case render as empty.
+    """
+    return pd.to_datetime(series, errors="coerce").dt.strftime("%Y-%m-%d")
+
+
+def latest_priced_date(df, date_col: str = "report_date", val_col: str = "national"):
+    """The date of the newest row that actually carries a price.
+
+    NOT max(date_col). LM_XB401 carries a Fresh 90% line on only two or three
+    days a week and publishes 0.00 on the rest, so the newest report date is
+    routinely a day with no price on it. Dating the headline figure by the max
+    put "Sep 17" above a tile showing Sep 16's $428.00 -- off by a session, in
+    a way a reader has no way to catch.
+    """
+    if df is None or df.empty or val_col not in df or date_col not in df:
+        return None
+    priced = df.dropna(subset=[val_col])
+    if priced.empty:
+        return None
+    return priced[date_col].max()
+
+
 def history_gap(archive, recent, date_col: str = "report_date"):
     """Days missing between the archive's last row and the recent window's first.
 
