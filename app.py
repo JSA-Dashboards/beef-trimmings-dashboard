@@ -483,11 +483,91 @@ def fetch_quota_fills() -> list:
     return sorted(fills, key=lambda f: f.as_of)
 
 
+def _sf_secret(key: str, default: str = "") -> str:
+    """Read from st.secrets first, fall back to os.environ."""
+    try:
+        v = st.secrets.get(key, "")
+        if v:
+            return str(v).strip()
+    except Exception:
+        pass
+    return os.environ.get(key, default).strip()
+
+
+def _sf_use() -> bool:
+    return _sf_secret("USE_SNOWFLAKE").lower() in ("1", "true", "yes", "on")
+
+
+def _sf_load_private_key():
+    """RSA private key (DER bytes) for key-pair auth; None if not configured (then
+    password is used). Fleet-standard naming -- see reference_usda_mars_api /
+    project_snowflake_migration in project memory."""
+    pem = _sf_secret("SNOWFLAKE_PRIVATE_KEY")
+    path = _sf_secret("SNOWFLAKE_PRIVATE_KEY_PATH")
+    if not pem and not path:
+        return None
+    from cryptography.hazmat.primitives import serialization
+    data = open(path, "rb").read() if path else pem.replace("\\n", "\n").encode()
+    pwd = _sf_secret("SNOWFLAKE_PRIVATE_KEY_PWD") or None
+    key = serialization.load_pem_private_key(data, password=pwd.encode() if pwd else None)
+    return key.private_bytes(
+        encoding=serialization.Encoding.DER,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption())
+
+
+def _sf_connect():
+    import snowflake.connector
+    kw = dict(
+        account=_sf_secret("SNOWFLAKE_ACCOUNT"),
+        user=_sf_secret("SNOWFLAKE_USER"),
+        role=_sf_secret("SNOWFLAKE_ROLE") or None,
+        warehouse=_sf_secret("SNOWFLAKE_WAREHOUSE") or None,
+        database=_sf_secret("SNOWFLAKE_DATABASE") or "JSA",
+        schema=_sf_secret("SNOWFLAKE_SCHEMA") or "BEEF_TRIMMINGS",
+        login_timeout=30,
+    )
+    pkey = _sf_load_private_key()
+    if pkey is not None:
+        kw["private_key"] = pkey
+    else:
+        kw["password"] = _sf_secret("SNOWFLAKE_PASSWORD")
+    return snowflake.connector.connect(**kw)
+
+
+def _fetch_import_cow90_snowflake() -> pd.DataFrame:
+    conn = _sf_connect()
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT REPORT_DATE, ORIGIN, AVG_PRICE, LOW_PRICE, HIGH_PRICE, N_ROWS
+            FROM JSA.BEEF_TRIMMINGS.IMPORT_COW90
+            ORDER BY REPORT_DATE
+        """)
+        rows = cur.fetchall()
+    finally:
+        conn.close()
+    df = pd.DataFrame(rows, columns=["report_date", "origin", "avg_price", "low", "high", "n"])
+    df["report_date"] = pd.to_datetime(df["report_date"])
+    return df
+
+
 # Same reasoning as fetch_us_weekly90: a persisted cache ignores its TTL, and
 # this pull is only a few MB.
 @st.cache_data(ttl=QUOTA_TTL_SECONDS, show_spinner=False)
 def fetch_import_cow90() -> pd.DataFrame:
-    """Full-history weekly Cow Meat (90%) import prices by origin from NW_LS421 (Import Beef Trade)."""
+    """Full-history weekly Cow Meat (90%) import prices by origin from NW_LS421 (Import Beef Trade).
+
+    Reads Snowflake (JSA.BEEF_TRIMMINGS.IMPORT_COW90) when USE_SNOWFLAKE is set --
+    marsapi.ams.usda.gov rejects requests from Streamlit Community Cloud's IPs
+    (confirmed 2026-10-04: the identical request returns 200 from a droplet and
+    401 from Cloud), so a droplet cron job fetches this weekly and writes it
+    there instead. Falls back to the direct MARS call for local dev, where the
+    IP block doesn't apply.
+    """
+    if _sf_use():
+        return _fetch_import_cow90_snowflake()
+
     hi = (datetime.now() + timedelta(days=2)).strftime("%m/%d/%Y")
     url  = f"{MARS_BASE}/{LS421_ID}"
     sess = _session()

@@ -4,3 +4,5 @@ plotly>=5.18.0
 requests>=2.31.0
 urllib3>=2.0.0
 pypdf>=5.0  # quota_tracker parses CBP Commodity Status Report PDFs; CBP publishes no API
+snowflake-connector-python>=3.0.0  # import data reads JSA.BEEF_TRIMMINGS -- marsapi.ams.usda.gov blocks Cloud IPs
+cryptography>=41.0.0  # key-pair auth for the Snowflake connection above
