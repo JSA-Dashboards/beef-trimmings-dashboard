@@ -46,12 +46,20 @@ QUOTA_ID = "0299035402BEEF"
 REPORT_INDEX = "https://www.cbp.gov/document/report/commodity-status-report"
 CBP_ROOT = "https://www.cbp.gov"
 
-# Reports that have rolled off the index page. Append as they age out; the
-# index only ever carries the current one and four previous.
+# Every report this quota has appeared in. APPEND EACH MONDAY'S URL -- the
+# index page carries only the current report and four previous, and the files
+# stay reachable long after they drop off it.
+#
+# Falling behind here does not blank the page, which is what makes it
+# dangerous: the series simply reverts to the newest report still on the index,
+# and a closed tranche's fill silently DROPS to an older, lower figure with
+# nothing to show why. Tranche 1 finished at 37.49% on the Sep 28 report; left
+# unseeded, it would have read 31.13% from Sep 21 once Sep 28 aged out.
 SEED_REPORTS = (
     "/sites/default/files/2026-09/26_0908_commodity_status_report_weekly.pdf",
     "/sites/default/files/2026-09/26_0914_commodity_status_report.pdf",
     "/sites/default/files/2026-09/26_0921_commodity_status_report.pdf",
+    "/sites/default/files/2026-09/26_0928_commodity_status_report.pdf",
 )
 
 
@@ -190,6 +198,44 @@ def parse_fill(text: str) -> Optional[Fill]:
         return None
     return Fill(as_of, start, end, limit, entered,
                 _num(m.group("pct")) or 0.0, m.group("status"))
+
+
+UPCOMING, OPEN, CLOSED = "upcoming", "open", "closed"
+
+
+def tranche_state(tranche: Tranche, today: date) -> str:
+    """Where a tranche sits against the CALENDAR, not against the last report.
+
+    The two diverge for several days every month and the gap is guaranteed: a
+    tranche closes on the 30th, CBP's next report does not land until the
+    following Monday, and in between the newest report still describes a window
+    that has already shut. Reading state off the report made a closed tranche
+    render as "open" with "2 days left" on 2026-10-02, two days after it ended
+    -- an invitation to plan a shipment into a window that no longer exists.
+    """
+    if today < tranche.start:
+        return UPCOMING
+    if today > tranche.end:
+        return CLOSED
+    return OPEN
+
+
+def days_remaining(tranche: Tranche, today: date) -> int:
+    """Calendar days left in the tranche, never negative."""
+    return max((tranche.end - today).days, 0)
+
+
+def current_tranche(today: date) -> Optional[Tranche]:
+    """The tranche the calendar is in, or None outside the programme.
+
+    Not the same as the tranche the newest report describes -- see
+    tranche_state. Between a close and the next report they are different
+    tranches, which is precisely when the page needs to say so.
+    """
+    for t in TRANCHES:
+        if t.start <= today <= t.end:
+            return t
+    return None
 
 
 def tranche_for(period_start: date) -> Optional[Tranche]:

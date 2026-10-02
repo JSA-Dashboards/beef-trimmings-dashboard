@@ -4,7 +4,7 @@ import plotly.graph_objects as go
 import requests
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 import time
 import os
@@ -100,18 +100,6 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
-
-# Hide the Streamlit Community Cloud viewer badge (the profile avatar that links
-# to the creator's other apps) for a clean, client-facing footer.
-# The Streamlit Cloud badge (creator avatar + logo) is drawn by Cloud's outer page,
-# outside this iframe, so CSS here can't reach it; add the rule to the parent
-# document instead (same-origin). No-op when run locally.
-_BADGE_JS = """<script>(function(){try{var w=window;while(w.parent&&w.parent!==w){try{void w.parent.document;w=w.parent;}catch(e){break;}}var d=w.document;if(d.getElementById('jsa-hide-cloud-badge'))return;var s=d.createElement('style');s.id='jsa-hide-cloud-badge';s.textContent="[class*='_profileContainer_'],[class*='_viewerBadge_']{display:none !important;}";d.head.appendChild(s);}catch(e){}})();</script>"""
-try:
-    st.html(_BADGE_JS, unsafe_allow_javascript=True)
-except TypeError:  # older Streamlit without st.html JS support
-    import streamlit.components.v1 as _stc
-    _stc.html(_BADGE_JS, height=0)
 
 st.markdown(f"""
 <style>
@@ -601,32 +589,57 @@ def render_quota(quota_fills) -> None:
         _same = [f for f in quota_fills if f.period_start == _latest.period_start]
         _rate = qtr.pace(_same)
         _proj = qtr.project_final(_same, _tr) if _tr else None
-        _left = (_tr.end - _latest.as_of).days if _tr else None
 
-        # Say which report these numbers come from and when the next is due.
-        # Everything below is weekly, so without this the page gives no way to
-        # tell a fresh figure from a four-day-old one.
+        # Against TODAY, not against the report. CBP's newest report lags the
+        # calendar by up to a week, so for several days after a tranche closes
+        # its last report still describes an open window -- which is how this
+        # page showed "2 days left" on a tranche that had ended two days
+        # earlier. See qtr.tranche_state.
+        _today = date.today()
+        _state = qtr.tranche_state(_tr, _today) if _tr else None
+        _left = qtr.days_remaining(_tr, _today) if _tr else None
+        _closed = _state == qtr.CLOSED
+        _now_tr = qtr.current_tranche(_today)
+
+        _age = (_today - _latest.as_of).days
         st.markdown(
             '<div class="note" style="margin:-4px 0 12px 0;">'
-            f'CBP report <b>{_latest.as_of:%b %d, %Y}</b> &nbsp;·&nbsp; next expected '
+            f'CBP report <b>{_latest.as_of:%b %d, %Y}</b>'
+            f' ({_age} day{"" if _age == 1 else "s"} ago) &nbsp;·&nbsp; next expected '
             f'<b>{qtr.next_expected_report(_latest.as_of):%a %b %d}</b>'
             ' &nbsp;·&nbsp; published weekly, first business day</div>',
             unsafe_allow_html=True,
         )
 
+        # The reported tranche and the live one part company for the few days
+        # between a close and the next Monday. Say so rather than letting the
+        # page look like the newer tranche does not exist.
+        if _now_tr is not None and _tr is not None and _now_tr.number != _tr.number:
+            st.markdown(
+                '<div class="ctx-flag">'
+                f'<b>Tranche {_now_tr.number} opened {_now_tr.start:%b %d}</b> and is running '
+                f'now. CBP has not reported on it yet &mdash; the figures below are '
+                f'tranche {_tr.number}&rsquo;s, and tranche {_now_tr.number} first appears in '
+                f'the {qtr.next_expected_report(_latest.as_of):%b %d} report.</div>',
+                unsafe_allow_html=True,
+            )
+
         cols = st.columns(4)
         with cols[0]:
             st.markdown(tile(
-                f"Tranche {_tr.number} filled" if _tr else "Filled",
+                (f"Tranche {_tr.number} {'final' if _closed else 'filled'}"
+                 if _tr else "Filled"),
                 f"{_latest.fill_pct:.1f}%",
                 f'<div class="tile-delta-neu">{_latest.entered_kg * qtr.MT_PER_KG:,.0f} '
                 f'of {_latest.limit_kg * qtr.MT_PER_KG:,.0f} mt</div>',
                 "tile-us"), unsafe_allow_html=True)
         with cols[1]:
             st.markdown(tile(
-                "Days left in tranche",
-                "—" if _left is None else f"{max(_left, 0):,.0f}",
-                f'<div class="tile-delta-neu">closes {_tr.end:%b %d}</div>' if _tr else "",
+                "Tranche window" if _closed else "Days left in tranche",
+                "Closed" if _closed else ("—" if _left is None else f"{_left:,.0f}"),
+                (f'<div class="tile-delta-neu">closed {_tr.end:%b %d}</div>' if _closed
+                 else (f'<div class="tile-delta-neu">closes {_tr.end:%b %d}</div>'
+                       if _tr else "")),
                 "tile-neu"), unsafe_allow_html=True)
         with cols[2]:
             # Unit goes in the sub-line: "1,212 mt/day" is wide enough to wrap
@@ -638,13 +651,25 @@ def render_quota(quota_fills) -> None:
                 if len(_same) > 1 else '<div class="tile-delta-neu">one report so far</div>',
                 "tile-neu"), unsafe_allow_html=True)
         with cols[3]:
-            _unused = (_tr.limit_kg - _proj) * qtr.MT_PER_KG if (_proj is not None and _tr) else None
-            st.markdown(tile(
-                "Projected at close",
-                "—" if _proj is None else f"{_proj / _tr.limit_kg * 100:.0f}%",
-                f'<div class="tile-delta-neg">{_unused:,.0f} mt expires unused</div>'
-                if _unused and _unused > 0 else "",
-                "tile-us"), unsafe_allow_html=True)
+            if _closed:
+                # Nothing left to project. Report what landed, and say plainly
+                # that it can still be revised up -- the last report predates
+                # the close, so the final days are not in this figure yet.
+                _gone = (_latest.limit_kg - _latest.entered_kg) * qtr.MT_PER_KG
+                st.markdown(tile(
+                    "Expired unused",
+                    f"{_gone:,.0f} mt",
+                    '<div class="tile-delta-neu">may revise with the next report</div>',
+                    "tile-neu"), unsafe_allow_html=True)
+            else:
+                _unused = ((_tr.limit_kg - _proj) * qtr.MT_PER_KG
+                           if (_proj is not None and _tr) else None)
+                st.markdown(tile(
+                    "Projected at close",
+                    "—" if _proj is None else f"{_proj / _tr.limit_kg * 100:.0f}%",
+                    f'<div class="tile-delta-neg">{_unused:,.0f} mt expires unused</div>'
+                    if _unused and _unused > 0 else "",
+                    "tile-us"), unsafe_allow_html=True)
 
         st.markdown(
             '<div class="note" style="margin-top:6px;">'
@@ -671,13 +696,20 @@ def render_quota(quota_fills) -> None:
                 'the tranche to the newest rather than the gap between the last two, '
                 'because CBP&rsquo;s weekly cadence slips around holidays and one short '
                 'week would otherwise read as a collapse in pace.<br><br>'
-                '<b>Projected at close</b> carries that straight line to the last day of '
-                'the tranche. It assumes entries keep arriving at the same rate, which is '
-                'likely to be <i>conservative</i>: unused quota does not carry forward, so '
-                'anyone holding product has a reason to land it before the window shuts. '
-                'Read it as &ldquo;if nothing changes&rdquo; rather than as a forecast, and '
-                'watch the next report — a jump in the daily rate this late moves the '
-                'projection quickly.</div>',
+                + ('<b>Expired unused</b> is what the tranche did not take: its limit less '
+                   'what had entered by the last report. Unused quota does not carry '
+                   'forward, so this quantity is simply gone. Treat it as provisional &mdash; '
+                   'the last report predates the close, so entries from the final days are '
+                   'not in it yet and the figure can still revise down when the next report '
+                   'lands.</div>'
+                   if _closed else
+                   '<b>Projected at close</b> carries that straight line to the last day of '
+                   'the tranche. It assumes entries keep arriving at the same rate, which is '
+                   'likely to be <i>conservative</i>: unused quota does not carry forward, so '
+                   'anyone holding product has a reason to land it before the window shuts. '
+                   'Read it as &ldquo;if nothing changes&rdquo; rather than as a forecast, and '
+                   'watch the next report — a jump in the daily rate this late moves the '
+                   'projection quickly.</div>'),
                 unsafe_allow_html=True,
             )
 
@@ -686,18 +718,26 @@ def render_quota(quota_fills) -> None:
             for _t in qtr.TRANCHES:
                 _obs = [f for f in quota_fills if f.period_start == _t.start]
                 _last = _obs[-1] if _obs else None
-                if _last is None:
-                    _state, _filled = "not yet reported", "—"
-                else:
-                    _state = "filled" if _last.status == "FILL" else "open"
-                    _filled = f"{_last.fill_pct:.2f}%"
+                # Status from the CALENDAR, with CBP's own FILL flag taking
+                # precedence -- a tranche that hit its limit early is "filled",
+                # which is a different thing from one that simply ran out of
+                # days. (Named _tstate, not _state: _state above is the current
+                # tranche's and this loop would shadow it.)
+                _tstate = qtr.tranche_state(_t, _today)
+                if _last is not None and _last.status == "FILL":
+                    _tstate = "filled"
+                elif _last is None and _tstate == qtr.OPEN:
+                    _tstate = "open — not yet reported"
+                elif _last is None:
+                    _tstate = f"{_tstate} — not reported"
+                _filled = "—" if _last is None else f"{_last.fill_pct:.2f}%"
                 _rows.append(
                     "<tr><td>Tranche {n}</td><td>{win}</td><td>{lim:,.0f}</td>"
                     "<td>{state}</td><td>{filled}</td></tr>".format(
                         n=_t.number,
                         win=f"{_t.start:%b %d} – {_t.end:%b %d}",
                         lim=_t.limit_kg * qtr.MT_PER_KG,
-                        state=_state, filled=_filled))
+                        state=_tstate, filled=_filled))
             st.markdown(
                 '<table class="ctx"><thead><tr><th>Tranche</th><th>Window</th>'
                 '<th>Limit (mt)</th><th>Status</th><th>Filled</th></tr></thead><tbody>'
