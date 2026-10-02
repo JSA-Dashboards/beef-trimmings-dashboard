@@ -1,4 +1,4 @@
-"""Proof that the Fresh 90s checks fire on bad input and stay quiet on good.
+﻿"""Proof that the Fresh 90s checks fire on bad input and stay quiet on good.
 
 A guard nobody has watched fail is not a guard. Every case below is a real row
 from LM_XB401 or LM_XB460, not a hypothetical -- the bad day is 2026-09-18, the
@@ -37,6 +37,8 @@ from trimmings_qc import (  # noqa: E402
     changes,
     dispersion,
     divergence,
+    history_gap,
+    merge_history,
     implied_outside_central,
 )
 
@@ -251,6 +253,76 @@ def test_residual_below_the_floor_yields_nothing():
 def test_central_heavier_than_national_yields_nothing():
     """Impossible -- National includes Central. Refuse rather than go negative."""
     assert implied_outside_central(345.42, 100000, 436.15, 125996) is None
+
+
+# ═══ 4. Joining the persisted archive to the live tail ═══════════════════════
+
+def _hist(dates, values):
+    return pd.DataFrame({"report_date": pd.to_datetime(dates), "national": values})
+
+
+def test_recent_wins_where_both_carry_a_date():
+    """The archive is persisted and never re-fetched, so it can be months old,
+    and AMS revises. The fresher row is the better one even when the stale one
+    is not obviously wrong."""
+    archive = _hist(["2026-09-14", "2026-09-16"], [435.21, 999.99])
+    recent = _hist(["2026-09-16", "2026-09-18"], [428.00, 345.42])
+    out = merge_history(archive, recent)
+    assert list(out["report_date"].dt.strftime("%m-%d")) == ["09-14", "09-16", "09-18"]
+    assert out.loc[out["report_date"] == "2026-09-16", "national"].iloc[0] == 428.00
+
+
+def test_no_duplicate_dates_after_the_join():
+    archive = _hist(["2026-09-14", "2026-09-16", "2026-09-18"], [1.0, 2.0, 3.0])
+    recent = _hist(["2026-09-16", "2026-09-18"], [20.0, 30.0])
+    out = merge_history(archive, recent)
+    assert out["report_date"].is_unique
+    assert len(out) == 3
+
+
+def test_join_is_sorted_even_when_the_inputs_are_not():
+    archive = _hist(["2026-09-16", "2026-09-14"], [2.0, 1.0])
+    recent = _hist(["2026-09-18"], [3.0])
+    out = merge_history(archive, recent)
+    assert out["report_date"].is_monotonic_increasing
+
+
+@pytest.mark.parametrize("archive,recent,expect_len", [
+    (None, "full", 2), ("full", None, 2), ("empty", "full", 2), ("full", "empty", 2),
+])
+def test_either_half_missing_still_returns_the_other(archive, recent, expect_len):
+    """A failed half should cost half the series, not all of it."""
+    full = _hist(["2026-09-14", "2026-09-16"], [1.0, 2.0])
+    blank = _hist([], [])
+    pick = {"full": full, "empty": blank, None: None}
+    out = merge_history(pick[archive], pick[recent])
+    assert len(out) == expect_len
+
+
+# ── The gap, which is the failure that would not look like one ───────────────
+
+def test_overlapping_halves_report_no_gap():
+    assert history_gap(_hist(["2026-09-14", "2026-09-16"], [1.0, 2.0]),
+                       _hist(["2026-09-16", "2026-09-18"], [2.0, 3.0])) is None
+
+
+def test_touching_halves_report_no_gap():
+    """Archive ends the day before the window starts: contiguous, not a hole."""
+    assert history_gap(_hist(["2026-09-15"], [1.0]), _hist(["2026-09-16"], [2.0])) is None
+
+
+def test_a_real_hole_is_reported_in_days():
+    """If the archive ages past the recent window's reach, the chart draws a
+    straight line across the hole -- it reads as a flat market, not as missing
+    data. The number has to come back so the page can say so."""
+    assert history_gap(_hist(["2026-06-01"], [1.0]), _hist(["2026-09-01"], [2.0])) == 91
+
+
+def test_gap_is_none_when_either_half_is_unusable():
+    full = _hist(["2026-09-16"], [1.0])
+    assert history_gap(None, full) is None
+    assert history_gap(full, None) is None
+    assert history_gap(_hist([], []), full) is None
 
 
 def test_prev_and_offset_mix_in_one_call():

@@ -1,4 +1,4 @@
-"""Reading the trimmings series without misreading it.
+﻿"""Reading the trimmings series without misreading it.
 
 Two separate ways this page has printed a number that meant something other
 than its label. Both are handled here so both can be tested.
@@ -67,6 +67,8 @@ preceding observation directly and is immune to spacing. Month and year
 tiles still use real date offsets, because there "roughly 30 days ago" is
 genuinely what is meant.
 """
+
+import pandas as pd
 
 from typing import NamedTuple, Optional
 
@@ -185,6 +187,45 @@ class _Prev:
 
 
 PREV = _Prev()
+
+
+def history_gap(archive, recent, date_col: str = "report_date"):
+    """Days missing between the archive's last row and the recent window's first.
+
+    None when the two overlap or touch, which is the normal case. A gap is
+    possible because the archive is persisted and never re-fetched, so on a
+    long-lived container it ages while the recent window stays a fixed number
+    of reports wide; eventually the window can stop reaching back far enough.
+
+    Worth returning rather than swallowing: a hole in the middle of this series
+    does not look like missing data on the chart, it looks like a flat stretch,
+    because the line connects straight across it.
+    """
+    if archive is None or recent is None or archive.empty or recent.empty:
+        return None
+    last, first = archive[date_col].max(), recent[date_col].min()
+    if pd.isna(last) or pd.isna(first):
+        return None
+    missing = (first - last).days - 1
+    return missing if missing > 0 else None
+
+
+def merge_history(archive, recent, date_col: str = "report_date"):
+    """Join the persisted deep archive to the freshly pulled tail.
+
+    `recent` wins wherever both carry a date. That ordering is the point: the
+    archive can be weeks or months old on a container that has not restarted,
+    and AMS revises published figures, so the fresher row is the better one even
+    when the older one is not obviously wrong.
+    """
+    if archive is None or archive.empty:
+        return recent.sort_values(date_col).reset_index(drop=True) if recent is not None else recent
+    if recent is None or recent.empty:
+        return archive.sort_values(date_col).reset_index(drop=True)
+    joined = pd.concat([archive, recent], ignore_index=True)
+    return (joined.drop_duplicates(subset=date_col, keep="last")
+                  .sort_values(date_col)
+                  .reset_index(drop=True))
 
 
 def changes(df, date_col: str, val_col: str, deltas):

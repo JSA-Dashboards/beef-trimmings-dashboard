@@ -76,7 +76,10 @@ ORIGIN_ANZ    = "Australia &/ New Zealand"
 # which takes 60-90s, hence the long timeout below. NW_LS421 only starts
 # 2020-02-26, so a fixed 2019-01-01 anchor safely covers its whole history and
 # stays small/fast (a few MB).
-US_FULL_HISTORY_REPORTS = 6000
+# Split deliberately; see the two cache decorators below for why.
+US_ARCHIVE_REPORTS = 6000        # everything back to 2003: 177 MB, 29 s
+US_RECENT_REPORTS = 400          # ~18 months of tail: 13 MB, 3 s
+US_RECENT_TTL_SECONDS = 3_600    # 1 hr, and this one is actually honoured
 IMPORT_HISTORY_START    = "01/01/2019"
 # LM_XB460 reaches back to 2003-01-03 -- 1,236 weekly reports as of Sep 2026,
 # so 1300 covers the archive with headroom. Fetched through the section path
@@ -336,12 +339,16 @@ def _session(backoff=3) -> requests.Session:
     return s
 
 
-@st.cache_data(ttl=3600, persist="disk", show_spinner=False)
-def fetch_us_fresh90() -> pd.DataFrame:
-    """Full-history daily US Chemical Lean, Fresh 90% — National & Central lines from LM_XB401."""
+def _pull_xb401(n_reports: int) -> pd.DataFrame:
+    """Fetch and parse the last `n_reports` of LM_XB401.
+
+    Shared by the archive and the recent window so the two cannot parse the
+    same feed differently -- a difference there would show up as a step in the
+    chart exactly where the two frames are joined.
+    """
     url  = f"{LMR_BASE}/{XB401_ID}/"
     sess = _session()
-    resp = sess.get(url, params={"lastReports": US_FULL_HISTORY_REPORTS, "allSections": "true"}, timeout=180)
+    resp = sess.get(url, params={"lastReports": n_reports, "allSections": "true"}, timeout=180)
     resp.raise_for_status()
     payload = resp.json()
 
@@ -398,6 +405,46 @@ def fetch_us_fresh90() -> pd.DataFrame:
                    "central_trades", "central_pounds"):
             out[_c] = None
     return out.sort_values("report_date").reset_index(drop=True)
+
+
+# The daily history is split in two because one fetch cannot be both cheap to
+# refresh and cheap to start. Measured against the live feed:
+#
+#     6000 reports (2003 to date)  177 MB   29 s
+#      400 reports (~18 months)     13 MB    3 s
+#
+# The deep archive never changes, so it is persisted and never re-fetched -- a
+# container that has the disk cache starts instantly. Only the tail moves, and
+# that is small enough to re-pull on a TTL that actually works.
+#
+# The two caches are deliberately configured in opposite ways, and neither is
+# an oversight:
+#   * archive: persist, NO ttl. Streamlit ignores a TTL on a persisted cache
+#     anyway (its own local_disk_cache_storage.py logs "has a TTL that will be
+#     ignored"), so asking for one would state an intent the runtime discards.
+#     Here permanence IS the intent.
+#   * recent: ttl, NO persist. Persisting it would void the TTL and freeze the
+#     page on whatever it first loaded -- which is exactly what the single
+#     combined fetch used to do with the headline number.
+@st.cache_data(persist="disk", show_spinner=False)
+def _fetch_us_archive() -> pd.DataFrame:
+    """The deep LM_XB401 history. Fetched once per disk cache, never refreshed."""
+    return _pull_xb401(US_ARCHIVE_REPORTS)
+
+
+@st.cache_data(ttl=US_RECENT_TTL_SECONDS, show_spinner=False)
+def _fetch_us_recent() -> pd.DataFrame:
+    """The live tail of LM_XB401, re-pulled on a TTL that is honoured."""
+    return _pull_xb401(US_RECENT_REPORTS)
+
+
+def fetch_us_fresh90() -> pd.DataFrame:
+    """Full daily US Chemical Lean, Fresh 90% — archive joined to the live tail.
+
+    Not cached itself: both halves are, and the join is a dozen milliseconds.
+    Caching here as well would add a third expiry rule to reason about.
+    """
+    return qc.merge_history(_fetch_us_archive(), _fetch_us_recent())
 
 
 # No persist="disk" here. Streamlit ignores a TTL on a disk-persisted cache --
@@ -647,10 +694,10 @@ with st.sidebar:
         'Import Beef Trade (<b>NW_LS421</b>), &quot;Cow Meat (90%)&quot; line by country of origin — '
         'the accepted proxy for import Frozen 90s. Published weekly, Fridays. Values average across '
         'East/West Coast and 0–15 / 16–45 day delivery windows reported that week.<br><br>'
-        f'Cache: the weekly and import pulls refresh every {QUOTA_TTL_SECONDS // 3600} hr. '
-        'The US daily history is '
-        'held for the whole session — Streamlit ignores a TTL on a disk-persisted cache — '
-        'so use <b>Refresh now</b> to force it.</div>',
+        f'Cache: the last ~18 months of US daily refresh every '
+        f'{US_RECENT_TTL_SECONDS // 3600} hr; the deep archive behind it is stored once and '
+        f'reused, since it never changes. Weekly and import pulls refresh every '
+        f'{QUOTA_TTL_SECONDS // 3600} hr. <b>Refresh now</b> forces all of them.</div>',
         unsafe_allow_html=True,
     )
 
@@ -928,6 +975,14 @@ with st.spinner("Loading full USDA beef trimmings history (US pull can take ~60-
         us_weekly = pd.DataFrame(
             columns=["report_date", "weekly", "weekly_trades", "weekly_pounds"])
 
+    # Does the persisted archive still reach the recent window? Both halves are
+    # cached, so this costs nothing. A hole between them would draw as a flat
+    # stretch rather than as a hole, so it has to be said out loud.
+    try:
+        _hist_gap = qc.history_gap(_fetch_us_archive(), _fetch_us_recent())
+    except Exception:
+        _hist_gap = None
+
 
 # ── Header ───────────────────────────────────────────────────────────────────
 
@@ -1007,6 +1062,16 @@ with c2:
 # ── Tiles — US Fresh 90s ─────────────────────────────────────────────────────
 
 st.markdown('<div class="sec-header">US Fresh 90s — Chemical Lean, National ($/cwt)</div>', unsafe_allow_html=True)
+
+if _hist_gap:
+    st.markdown(
+        '<div class="ctx-flag">'
+        f'<b>{_hist_gap:,} days missing from the price history.</b> The stored archive '
+        'no longer reaches back as far as the live window, so the chart draws straight '
+        'across the gap rather than showing it. Use <b>Refresh now</b>, or widen '
+        'US_RECENT_REPORTS.</div>',
+        unsafe_allow_html=True,
+    )
 
 # A thin rule, not a verdict. It reports what is unusual about the session and
 # stops there -- whether that makes the print a good read of the market is the
