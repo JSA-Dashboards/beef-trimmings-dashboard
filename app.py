@@ -170,11 +170,16 @@ st.markdown(f"""
 
   header[data-testid="stHeader"] {{ display:none !important; }}
   #MainMenu, footer {{ visibility:hidden !important; }}
-  /* .stDeployButton is a stale selector on current Streamlit -- the button now
-     lives inside stToolbar, which also spans the top strip and painted over
-     the view switch. The switch rendered, reported itself visible, and
-     elementFromPoint still returned the toolbar. Hide the toolbar itself. */
-  .stDeployButton, [data-testid="stToolbar"] {{ display:none !important; }}
+  /* DO NOT hide [data-testid="stToolbar"] here. Under the portal shell that
+     element carries st.navigation's top nav -- the row of links to the other
+     twelve dashboards -- so hiding it to get rid of the Deploy button takes
+     the whole nav with it and strands anyone who lands on this page. It did,
+     until 2026-10-02.
+     Nothing on this page needs it hidden any more: the toolbar was painting
+     over the view switch only while that switch sat at the very top, and it
+     now sits below the masthead. Every other page in the portal hides just
+     .stDeployButton, so this one does the same. */
+  .stDeployButton {{ display:none; }}
 
   .stApp {{ background-color:#ffffff; }}
   /* padding-top was 0.75rem, which removed the space Streamlit reserves for
