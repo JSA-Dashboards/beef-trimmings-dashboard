@@ -35,9 +35,11 @@ from trimmings_qc import (  # noqa: E402
     PREV,
     assess_print,
     changes,
+    date_text,
     dispersion,
     divergence,
     history_gap,
+    latest_priced_date,
     merge_history,
     implied_outside_central,
 )
@@ -253,6 +255,49 @@ def test_residual_below_the_floor_yields_nothing():
 def test_central_heavier_than_national_yields_nothing():
     """Impossible -- National includes Central. Refuse rather than go negative."""
     assert implied_outside_central(345.42, 100000, 436.15, 125996) is None
+
+
+# ═══ 3b. Dating and rendering, where an empty frame used to crash ════════════
+
+def test_empty_fallback_frame_renders_instead_of_crashing():
+    """A fetch that degrades returns a frame built from a column LIST, so the
+    date column is object dtype. `.dt` on object raises and took the whole page
+    down at the data table -- an import outage killing the price page."""
+    empty = pd.DataFrame(columns=["report_date", "origin", "avg_price"])
+    assert empty["report_date"].dtype == object
+    with pytest.raises(AttributeError):
+        empty["report_date"].dt.strftime("%Y-%m-%d")      # the old call
+    assert len(date_text(empty["report_date"])) == 0      # the new one
+
+
+def test_date_text_is_unchanged_on_a_real_column():
+    real = pd.Series(pd.to_datetime(["2026-09-18", "2026-10-02"]))
+    assert list(date_text(real)) == ["2026-09-18", "2026-10-02"]
+
+
+def test_date_text_leaves_a_bad_value_blank_rather_than_raising():
+    out = date_text(pd.Series(["2026-09-18", "not a date", None]))
+    assert out.iloc[0] == "2026-09-18"
+    assert pd.isna(out.iloc[1]) and pd.isna(out.iloc[2])
+
+
+def test_headline_date_is_the_priced_session_not_the_newest_report():
+    """LM_XB401 publishes 0.00 on the days nothing traded, so the newest report
+    date is routinely unpriced. Sep 17 was such a day; the price on screen was
+    Sep 16's."""
+    df = pd.DataFrame({
+        "report_date": pd.to_datetime(["2026-09-16", "2026-09-17"]),
+        "national": [428.00, None],
+    })
+    assert df["report_date"].max() == pd.Timestamp("2026-09-17")   # the old answer
+    assert latest_priced_date(df) == pd.Timestamp("2026-09-16")    # the right one
+
+
+def test_latest_priced_date_handles_nothing_to_date():
+    assert latest_priced_date(pd.DataFrame(columns=["report_date", "national"])) is None
+    assert latest_priced_date(pd.DataFrame({
+        "report_date": pd.to_datetime(["2026-09-17"]), "national": [None]})) is None
+    assert latest_priced_date(None) is None
 
 
 # ═══ 4. Joining the persisted archive to the live tail ═══════════════════════
