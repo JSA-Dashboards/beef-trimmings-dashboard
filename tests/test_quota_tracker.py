@@ -61,6 +61,18 @@ OTHR_REGULAR = ("0201101BEEF03 Beef - OTHR 202601 01/01/2026 12/31/2026 - "
 EXCLUDED = ("0299035402BEEF Affordable Beef CANADA - 202601 09/01/2026 09/30/2026 - "
             "0 KG - 0.00% EXCL -")
 
+# Tranche 2. Verbatim from 26_1005_ and 26_1013_commodity_status_report.pdf.
+# Note the ending: `11.28% - -`, where every tranche-1 row said `37.49% OPEN -`.
+# CBP blanks the status column on a freshly-opened period.
+OCT05 = ("0299035402BEEF Affordable Beef - OTHR 202602 10/01/2026 10/30/2026 - "
+         "100000000 KG 2181443.07 2.18% - -")
+OCT13 = ("0299035402BEEF Affordable Beef - OTHR 202602 10/01/2026 10/30/2026 - "
+         "100000000 KG 11280748.58 11.28% - -")
+# The same blanking on an unrelated quota in the same report, which is what
+# says this is CBP's behaviour on a period roll rather than something about us.
+USTR_AR_OCT = ("025085ARBEEF USTR AR BEEF ARGENTINA - 202604 10/01/2026 12/31/2026 - "
+               "20000000 KG 11981103.6 59.91% - -")
+
 
 # ── Reading one report ───────────────────────────────────────────────────────
 
@@ -72,6 +84,62 @@ def test_reads_the_real_september_21_line():
     assert f.entered_kg == pytest.approx(31_128_697.86)
     assert f.fill_pct == pytest.approx(31.13)
     assert f.status == "OPEN"
+
+
+def test_reads_the_real_october_13_line_despite_a_blank_status():
+    """Tranche 2's rows end `11.28% - -`, with no status word at all."""
+    f = parse_fill(_report("October 13, 2026", ARGENTINA, OCT13, USTR_AR_OCT))
+    assert f.as_of == date(2026, 10, 13)
+    assert f.period_start == date(2026, 10, 1) and f.period_end == date(2026, 10, 30)
+    assert f.limit_kg == pytest.approx(100_000_000)
+    assert f.entered_kg == pytest.approx(11_280_748.58)
+    assert f.fill_pct == pytest.approx(11.28)
+    assert tranche_for(f.period_start).number == 2
+
+
+def test_a_blank_status_is_empty_rather_than_guessed_at():
+    """CBP did not say OPEN, so neither do we.
+
+    The quota plainly was open, but `status == "FILL"` decides on the page
+    whether a tranche reads as filled or merely finished, so a value invented
+    here would be load-bearing fiction.
+    """
+    f = parse_fill(_report("October 13, 2026", OCT13))
+    assert f.status == ""
+    assert f.status != "OPEN"
+    assert f.status != "FILL"       # the comparison the page actually makes
+
+
+def test_the_whole_tranche_2_series_parses():
+    fills = [parse_fill(_report("October 5, 2026", OCT05)),
+             parse_fill(_report("October 13, 2026", OCT13))]
+    assert [f.entered_kg for f in fills] == [pytest.approx(2_181_443.07),
+                                             pytest.approx(11_280_748.58)]
+    # 8 days, 9,099,305.51 kg -> ~1,137 mt/day. Stated so a silent change in
+    # the pace window shows up as arithmetic rather than as a nicer number.
+    assert pace(fills) == pytest.approx((11_280_748.58 - 2_181_443.07) / 8)
+
+
+def test_a_strict_status_column_cannot_read_tranche_2():
+    """The fix is load-bearing, and this proves the mutation really mutates.
+
+    Restoring `[A-Z]+` -- the pattern that shipped -- must fail on the October
+    line while still reading September's. Two earlier attempts at a mutation
+    test in this file produced patterns that could not match anything, so they
+    "passed" while proving nothing; hence the assertion that the substitution
+    actually changed the pattern.
+    """
+    import re
+
+    from quota_tracker import _LINE
+
+    strict_src = _LINE.pattern.replace(r"(?P<status>[A-Z]+|-)", r"(?P<status>[A-Z]+)")
+    assert strict_src != _LINE.pattern, "the mutation did not apply -- test proves nothing"
+    strict = re.compile(strict_src)
+
+    assert strict.search(SEP21) is not None      # the old pattern was fine here
+    assert strict.search(OCT13) is None          # and this is what it lost
+    assert _LINE.search(OCT13) is not None       # the shipped pattern reads it
 
 
 def test_header_date_beats_the_filename():
