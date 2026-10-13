@@ -877,7 +877,10 @@ def render_quota(quota_fills) -> None:
                               if qtr.tranche_for(f.period_start) else "—"),
                   "Entered (mt)": _count(f.entered_kg * qtr.MT_PER_KG),
                   "Filled": f"{f.fill_pct:.2f}%",
-                  "Status": f.status}
+                  # CBP blanks this column on a freshly-opened period (see
+                  # quota_tracker). An empty cell reads as a parse failure, so
+                  # say whose omission it is.
+                  "Status": f.status or "not stated"}
                  for f in reversed(quota_fills)])
             st.dataframe(_wk, width="stretch", height=240)
             st.markdown(

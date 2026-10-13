@@ -35,6 +35,31 @@ for links rather than guessing a pattern. The index keeps only the current
 report and four previous, so SEED_REPORTS holds the ones that have rolled off;
 without it the series would silently truncate to the last five weeks partway
 through the quota.
+
+THE STATUS COLUMN GOES BLANK WHEN A PERIOD ROLLS OVER, and that cost tranche 2
+its first two reports. Every tranche-1 row ended `... 37.49% OPEN -`; the moment
+the quota rolled to period 202602 the same row ended `... 11.28% - -`, with
+CBP's own empty marker where OPEN had been. `_LINE` required `[A-Z]+` there, so
+the match failed, `parse_fill` returned None, and the page went on showing
+tranche 1 -- with no error, because a report that does not parse is skipped by
+design so one bad week cannot cost the series.
+
+It is not specific to this quota: the USTR Argentina line (025085ARBEEF) blanked
+its status in the same report when it rolled to 202604, while every row whose
+period did NOT roll kept OPEN / POTF / EXCL / FILL. So it is a property of a
+freshly-opened period in CBP's system, and it will happen again when tranche 3
+opens on Oct 31.
+
+A blank status is stored as "" rather than guessed at. The quota is plainly
+open -- 11.28% of it had entered -- but OPEN is CBP's word and they did not say
+it, and `status == "FILL"` is load-bearing on the page, so inventing a value
+there is the one thing that could do real harm.
+
+Deliberately NOT added while fixing it: a check that `pct` equals
+`entered / limit`. It holds on every report so far and is tempting as a free
+audit, but a second mandatory field is how the first one failed -- the lesson
+here is that CBP can blank a column without notice, and a row that fails an
+audit should still report its kilograms.
 """
 
 import re
@@ -60,6 +85,8 @@ SEED_REPORTS = (
     "/sites/default/files/2026-09/26_0914_commodity_status_report.pdf",
     "/sites/default/files/2026-09/26_0921_commodity_status_report.pdf",
     "/sites/default/files/2026-09/26_0928_commodity_status_report.pdf",
+    "/sites/default/files/2026-10/26_1005_commodity_status_report.pdf",
+    "/sites/default/files/2026-10/26_1013_commodity_status_report.pdf",
 )
 
 
@@ -126,7 +153,7 @@ class Fill(NamedTuple):
     limit_kg: float
     entered_kg: float
     fill_pct: float
-    status: str            # OPEN / FILL / EXCL, verbatim from CBP
+    status: str            # OPEN / FILL / EXCL, verbatim from CBP; "" when blank
 
 
 _NUM = r"[\d,]+(?:\.\d+)?"
@@ -136,7 +163,7 @@ _LINE = re.compile(
     + r"(?P<start>\d{2}/\d{2}/\d{4})\s+(?P<end>\d{2}/\d{2}/\d{4})\s+"
     + r"\S+\s+(?P<limit>" + _NUM + r")\s+KG\s+"
     + r"(?P<entered>" + _NUM + r"|-)\s+"
-    + r"(?P<pct>" + _NUM + r")%\s+(?P<status>[A-Z]+)"
+    + r"(?P<pct>" + _NUM + r")%\s+(?P<status>[A-Z]+|-)"
 )
 
 _AS_OF = re.compile(r"Commodity Status Report\s+([A-Z][a-z]+ \d{1,2}, \d{4})")
@@ -196,8 +223,9 @@ def parse_fill(text: str) -> Optional[Fill]:
     start, end = _mdy(m.group("start")), _mdy(m.group("end"))
     if limit is None or not limit or start is None or end is None:
         return None
+    status = m.group("status")
     return Fill(as_of, start, end, limit, entered,
-                _num(m.group("pct")) or 0.0, m.group("status"))
+                _num(m.group("pct")) or 0.0, "" if status == "-" else status)
 
 
 UPCOMING, OPEN, CLOSED = "upcoming", "open", "closed"
